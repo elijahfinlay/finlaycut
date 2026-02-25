@@ -3,6 +3,7 @@ import { Button } from '../common/Button'
 import { Slider } from '../common/Slider'
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
+import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
 import { apiFetch } from '../../hooks/useApi'
 import { useProgress } from '../../hooks/useWebSocket'
 
@@ -80,6 +81,8 @@ export function SilenceRemoval() {
 
   return (
     <div className="feature-panel">
+      <TimelineBanner />
+
       <div>
         <h2 className="feature-title">Silence Removal</h2>
         <p className="feature-description">
@@ -160,9 +163,13 @@ export function SilenceRemoval() {
               ))}
             </div>
 
-            <Button onClick={handleApply} variant="success" loading={applying} size="lg">
+            <ConfirmApply
+              onConfirm={handleApply}
+              loading={applying}
+              description={`This will remove ${selectedCount} silent segments (${totalSilence.toFixed(1)}s total).`}
+            >
               Apply ({selectedCount} cuts)
-            </Button>
+            </ConfirmApply>
           </div>
         </Card>
       )}

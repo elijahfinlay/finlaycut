@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { Button } from '../common/Button'
+import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
@@ -63,6 +64,7 @@ export function FillerWordRemoval() {
 
   return (
     <div className="feature-panel">
+      <TimelineBanner />
       <div>
         <h2 className="feature-title">Filler Word Removal</h2>
         <p className="feature-description">
@@ -115,9 +117,9 @@ export function FillerWordRemoval() {
               ))}
             </div>
 
-            <Button onClick={handleApply} variant="success" loading={applying} size="lg">
+            <ConfirmApply onConfirm={handleApply} loading={applying} size="lg">
               Remove Selected ({selectedCount})
-            </Button>
+            </ConfirmApply>
           </div>
         </Card>
       )}

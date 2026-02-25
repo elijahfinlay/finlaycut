@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { Button } from '../common/Button'
+import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
@@ -53,6 +54,7 @@ export function BRollSuggestions() {
 
   return (
     <div className="feature-panel">
+      <TimelineBanner />
       <div>
         <h2 className="feature-title">AI B-Roll Suggestions</h2>
         <p className="feature-description">
@@ -109,14 +111,13 @@ export function BRollSuggestions() {
             </Card>
           ))}
 
-          <Button
-            onClick={handleInsert}
-            variant="success"
+          <ConfirmApply
+            onConfirm={handleInsert}
             size="lg"
             disabled={!suggestions.some((s) => s.selected)}
           >
             Insert Selected B-Roll
-          </Button>
+          </ConfirmApply>
         </div>
       )}
 

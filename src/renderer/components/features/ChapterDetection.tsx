@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { Button } from '../common/Button'
+import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
@@ -76,6 +77,7 @@ export function ChapterDetection() {
 
   return (
     <div className="feature-panel">
+      <TimelineBanner />
       <div>
         <h2 className="feature-title">Chapter Detection</h2>
         <p className="feature-description">
@@ -138,9 +140,9 @@ export function ChapterDetection() {
             </div>
 
             <div className="flex gap-3">
-              <Button onClick={handleApply} variant="success" loading={applying}>
+              <ConfirmApply onConfirm={handleApply} loading={applying}>
                 Add Markers
-              </Button>
+              </ConfirmApply>
               <Button variant="ghost" onClick={handleCopyYouTube}>
                 Copy YouTube Chapters
               </Button>

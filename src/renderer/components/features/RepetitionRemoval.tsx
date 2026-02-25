@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { Button } from '../common/Button'
+import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
@@ -51,6 +52,7 @@ export function RepetitionRemoval() {
 
   return (
     <div className="feature-panel">
+      <TimelineBanner />
       <div>
         <h2 className="feature-title">Take/Repetition Removal</h2>
         <p className="feature-description">
@@ -98,9 +100,9 @@ export function RepetitionRemoval() {
             </Card>
           ))}
 
-          <Button onClick={handleApply} variant="success" size="lg">
+          <ConfirmApply onConfirm={handleApply} size="lg">
             Keep Best Takes
-          </Button>
+          </ConfirmApply>
         </div>
       )}
 

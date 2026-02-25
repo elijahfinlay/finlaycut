@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { Button } from '../common/Button'
 import { Slider } from '../common/Slider'
-import { Toggle } from '../common/Toggle'
 import { Card } from '../common/Card'
 import { apiFetch } from '../../hooks/useApi'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -20,6 +19,8 @@ export function SettingsPanel() {
   const loadSettings = async () => {
     try {
       const data = await apiFetch('/api/settings/')
+      // Only update non-secret fields from server. Don't touch API keys
+      // since the server doesn't return them (only has_claude_key: bool).
       settings.updateSettings({
         aiBackend: data.ai_backend,
         ollamaModel: data.ollama_model,
@@ -49,18 +50,19 @@ export function SettingsPanel() {
     setSaving(true)
     setMessage('')
     try {
+      // Send empty strings as empty strings (not null) so the backend can clear them
       await apiFetch('/api/settings/', {
         method: 'PUT',
         body: JSON.stringify({
           ai_backend: settings.aiBackend,
-          claude_api_key: settings.claudeApiKey || null,
+          claude_api_key: settings.claudeApiKey,
           ollama_model: settings.ollamaModel,
           whisper_model: settings.whisperModel,
           silence_threshold_db: settings.silenceThresholdDb,
           silence_min_duration_ms: settings.silenceMinDurationMs,
           silence_padding_ms: settings.silencePaddingMs,
           filler_words: settings.fillerWords,
-          pexels_api_key: settings.pexelsApiKey || null,
+          pexels_api_key: settings.pexelsApiKey,
           cache_limit_gb: settings.cacheLimitGb,
           backup_retention_days: settings.backupRetentionDays,
         })
@@ -124,11 +126,11 @@ export function SettingsPanel() {
             <div>
               <label className="text-sm text-resolve-textDim block mb-1">Claude API Key</label>
               <input
-                type="password"
+                type="text"
                 value={settings.claudeApiKey}
                 onChange={(e) => settings.updateSettings({ claudeApiKey: e.target.value })}
                 placeholder="sk-ant-..."
-                className="w-full bg-resolve-bg border border-resolve-border rounded-lg px-3 py-2 text-sm text-resolve-text placeholder:text-resolve-textMuted"
+                className="w-full bg-resolve-bg border border-resolve-border rounded-lg px-3 py-2 text-sm text-resolve-text placeholder:text-resolve-textMuted font-mono"
               />
             </div>
           )}
@@ -189,11 +191,11 @@ export function SettingsPanel() {
         <div>
           <label className="text-sm text-resolve-textDim block mb-1">Pexels API Key (for B-Roll)</label>
           <input
-            type="password"
+            type="text"
             value={settings.pexelsApiKey}
             onChange={(e) => settings.updateSettings({ pexelsApiKey: e.target.value })}
             placeholder="Enter Pexels API key..."
-            className="w-full bg-resolve-bg border border-resolve-border rounded-lg px-3 py-2 text-sm text-resolve-text placeholder:text-resolve-textMuted"
+            className="w-full bg-resolve-bg border border-resolve-border rounded-lg px-3 py-2 text-sm text-resolve-text placeholder:text-resolve-textMuted font-mono"
           />
           <p className="text-xs text-resolve-textMuted mt-1">
             Free at pexels.com/api. 200 requests/hour.

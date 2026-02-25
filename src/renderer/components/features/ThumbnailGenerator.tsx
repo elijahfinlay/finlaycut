@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { Button } from '../common/Button'
+import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
 import { Slider } from '../common/Slider'
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
@@ -35,6 +36,7 @@ export function ThumbnailGenerator() {
 
   return (
     <div className="feature-panel">
+      <TimelineBanner />
       <div>
         <h2 className="feature-title">AI Thumbnail Generator</h2>
         <p className="feature-description">

@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { Button } from '../common/Button'
+import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
 import { Slider } from '../common/Slider'
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
@@ -77,6 +78,7 @@ export function DynamicZoom() {
 
   return (
     <div className="feature-panel">
+      <TimelineBanner />
       <div>
         <h2 className="feature-title">Dynamic Zoom Cuts</h2>
         <p className="feature-description">
@@ -158,9 +160,9 @@ export function DynamicZoom() {
               ))}
             </div>
 
-            <Button onClick={handleApply} variant="success" loading={applying} size="lg">
+            <ConfirmApply onConfirm={handleApply} loading={applying} size="lg">
               Apply Zooms ({selectedCount})
-            </Button>
+            </ConfirmApply>
           </div>
         </Card>
       )}

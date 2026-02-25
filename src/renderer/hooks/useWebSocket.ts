@@ -10,84 +10,105 @@ export interface WSMessage {
   error?: string
 }
 
-export function useWebSocket() {
-  const [connected, setConnected] = useState(false)
-  const [lastMessage, setLastMessage] = useState<WSMessage | null>(null)
-  const wsRef = useRef<WebSocket | null>(null)
-  const reconnectTimer = useRef<NodeJS.Timeout | null>(null)
+// ---- Singleton WebSocket manager ----
+// One connection shared by all components. Fixes bug where each panel
+// opened its own WebSocket and progress was lost when switching panels.
 
-  const connect = useCallback(() => {
-    try {
-      const wsUrl = getBaseUrl().replace('http', 'ws') + '/ws'
-      const ws = new WebSocket(wsUrl)
+type Listener = (msg: WSMessage) => void
 
-      ws.onopen = () => {
-        setConnected(true)
-      }
+const listeners = new Set<Listener>()
+let ws: WebSocket | null = null
+let wsConnected = false
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data) as WSMessage
-          setLastMessage(msg)
-        } catch {
-          // Ignore malformed messages
-        }
-      }
+function connectWs() {
+  try {
+    const wsUrl = getBaseUrl().replace('http', 'ws') + '/ws'
+    ws = new WebSocket(wsUrl)
 
-      ws.onclose = () => {
-        setConnected(false)
-        // Reconnect after 3 seconds
-        reconnectTimer.current = setTimeout(connect, 3000)
-      }
-
-      ws.onerror = () => {
-        ws.close()
-      }
-
-      wsRef.current = ws
-    } catch {
-      reconnectTimer.current = setTimeout(connect, 3000)
+    ws.onopen = () => {
+      wsConnected = true
     }
-  }, [])
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data) as WSMessage
+        listeners.forEach((fn) => fn(msg))
+      } catch {
+        // ignore malformed
+      }
+    }
+
+    ws.onclose = () => {
+      wsConnected = false
+      ws = null
+      reconnectTimer = setTimeout(connectWs, 3000)
+    }
+
+    ws.onerror = () => {
+      ws?.close()
+    }
+  } catch {
+    reconnectTimer = setTimeout(connectWs, 3000)
+  }
+}
+
+// Start the singleton connection once
+connectWs()
+
+function subscribe(fn: Listener) {
+  listeners.add(fn)
+  return () => {
+    listeners.delete(fn)
+  }
+}
+
+// ---- Hooks ----
+
+export function useWebSocket() {
+  const [connected, setConnected] = useState(wsConnected)
+  const [lastMessage, setLastMessage] = useState<WSMessage | null>(null)
 
   useEffect(() => {
-    connect()
-    return () => {
-      if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
-      wsRef.current?.close()
-    }
-  }, [connect])
+    const unsub = subscribe((msg) => {
+      setLastMessage(msg)
+      setConnected(true)
+    })
+    return unsub
+  }, [])
 
   return { connected, lastMessage }
 }
 
 export function useProgress(operation: string) {
-  const { lastMessage } = useWebSocket()
   const [progress, setProgress] = useState(0)
   const [message, setMessage] = useState('')
   const [isComplete, setIsComplete] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!lastMessage || lastMessage.operation !== operation) return
+    const unsub = subscribe((msg) => {
+      if (msg.operation !== operation) return
 
-    switch (lastMessage.type) {
-      case 'progress':
-        setProgress(lastMessage.progress || 0)
-        setMessage(lastMessage.message || '')
-        setIsComplete(false)
-        setError(null)
-        break
-      case 'complete':
-        setProgress(1)
-        setIsComplete(true)
-        setError(null)
-        break
-      case 'error':
-        setError(lastMessage.error || 'Unknown error')
-        break
-    }
-  }, [lastMessage, operation])
+      switch (msg.type) {
+        case 'progress':
+          setProgress(msg.progress || 0)
+          setMessage(msg.message || '')
+          setIsComplete(false)
+          setError(null)
+          break
+        case 'complete':
+          setProgress(1)
+          setIsComplete(true)
+          setError(null)
+          break
+        case 'error':
+          setError(msg.error || 'Unknown error')
+          break
+      }
+    })
+    return unsub
+  }, [operation])
 
   const reset = useCallback(() => {
     setProgress(0)

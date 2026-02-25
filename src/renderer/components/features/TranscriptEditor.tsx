@@ -2,6 +2,7 @@ import React, { useState, useCallback } from 'react'
 import { Button } from '../common/Button'
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
+import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
 import { apiFetch } from '../../hooks/useApi'
 import { useProgress } from '../../hooks/useWebSocket'
 
@@ -140,6 +141,8 @@ export function TranscriptEditor() {
 
   return (
     <div className="feature-panel">
+      <TimelineBanner />
+
       <div>
         <h2 className="feature-title">Transcript Editor</h2>
         <p className="feature-description">
@@ -253,14 +256,14 @@ export function TranscriptEditor() {
                 {' '}kept out of{' '}
                 <span>{formatDuration(totalSeconds)}</span>
               </div>
-              <Button
-                onClick={handleApply}
-                variant="success"
+              <ConfirmApply
+                onConfirm={handleApply}
                 loading={applying}
                 disabled={deletedCount === 0}
+                description={`This will mark ${deletedCount} words for removal (${deletedSeconds.toFixed(1)}s of footage).`}
               >
                 Apply Cuts ({deletedCount} words)
-              </Button>
+              </ConfirmApply>
             </div>
           </Card>
         </>

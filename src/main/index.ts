@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, Menu } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { PythonManager } from './python-manager'
@@ -16,7 +16,7 @@ function createWindow(): void {
     show: false,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 15, y: 15 },
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#141418',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -44,6 +44,16 @@ function createWindow(): void {
 app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.finlaycut.app')
 
+  // FIX BUG #1: Register app menu so Cmd+C/V/X/Z/A work (paste was broken without this)
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      { role: 'appMenu' },
+      { role: 'editMenu' },
+      { role: 'viewMenu' },
+      { role: 'windowMenu' },
+    ])
+  )
+
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
@@ -62,17 +72,18 @@ app.whenReady().then(async () => {
   })
 })
 
-app.on('window-all-closed', async () => {
-  if (pythonManager) {
-    await pythonManager.stop()
-  }
+// FIX BUG #11: Only stop Python once
+let pythonStopped = false
+
+app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
   }
 })
 
 app.on('before-quit', async () => {
-  if (pythonManager) {
+  if (pythonManager && !pythonStopped) {
+    pythonStopped = true
     await pythonManager.stop()
   }
 })

@@ -1,6 +1,7 @@
 """Filler word detection and removal endpoints."""
 
 from fastapi import APIRouter
+from pydantic import BaseModel
 from typing import Optional
 from services.resolve_service import resolve_service
 from services.audio_service import audio_service
@@ -11,11 +12,13 @@ from api.websocket import manager
 router = APIRouter()
 
 
-@router.post("/analyze")
-async def analyze_filler_words(
-    language: Optional[str] = None,
+class FillerAnalyzeRequest(BaseModel):
+    language: Optional[str] = None
     filler_words: Optional[list[str]] = None
-):
+
+
+@router.post("/analyze")
+async def analyze_filler_words(request: FillerAnalyzeRequest = FillerAnalyzeRequest()):
     """Transcribe the timeline audio and detect filler words."""
     clips = resolve_service.get_timeline_clips("video", 1)
     if not clips:
@@ -32,14 +35,10 @@ async def analyze_filler_words(
         audio_path = extract_audio(file_path)
 
         await manager.send_progress("filler_words", 0.1, "Transcribing...")
-
-        async def progress_cb(pct, msg):
-            await manager.send_progress("filler_words", 0.1 + pct * 0.7, msg)
-
-        transcript = audio_service.transcribe(audio_path, language=language)
+        transcript = audio_service.transcribe(audio_path, language=request.language)
 
         await manager.send_progress("filler_words", 0.85, "Detecting filler words...")
-        detections = audio_service.detect_filler_words(transcript, filler_words)
+        detections = audio_service.detect_filler_words(transcript, request.filler_words)
 
         await manager.send_progress("filler_words", 1.0, f"Found {len(detections)} filler words")
 

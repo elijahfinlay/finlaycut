@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { Button } from '../common/Button'
+import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
@@ -59,6 +60,7 @@ export function ViralClipDetector() {
 
   return (
     <div className="feature-panel">
+      <TimelineBanner />
       <div>
         <h2 className="feature-title">Viral Clip Detection</h2>
         <p className="feature-description">
@@ -109,7 +111,7 @@ export function ViralClipDetector() {
                     <span>{Math.round(clip.duration_seconds)}s</span>
                   </div>
                 </div>
-                <Button size="sm" variant="ghost" onClick={() => handleCreate(clip)}>
+                <Button size="sm" variant="ghost" onClick={(e) => { e.stopPropagation(); handleCreate(clip) }}>
                   Create 9:16
                 </Button>
               </div>

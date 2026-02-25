@@ -5,18 +5,18 @@ module.exports = {
     extend: {
       colors: {
         resolve: {
-          bg: '#1a1a2e',
-          surface: '#222244',
-          surfaceLight: '#2a2a4a',
-          border: '#333366',
-          accent: '#6c63ff',
-          accentHover: '#7b73ff',
+          bg: '#141418',
+          surface: '#1c1c22',
+          surfaceLight: '#26262e',
+          border: '#333340',
+          accent: '#3b82f6',
+          accentHover: '#60a5fa',
           success: '#4ade80',
           warning: '#fbbf24',
           error: '#f87171',
-          text: '#e2e8f0',
-          textDim: '#94a3b8',
-          textMuted: '#64748b'
+          text: '#e4e4e8',
+          textDim: '#9ca3af',
+          textMuted: '#6b7280'
         }
       },
       fontFamily: {

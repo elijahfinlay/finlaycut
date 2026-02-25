@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { Button } from '../common/Button'
+import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
@@ -44,6 +45,7 @@ export function PodcastEditor() {
 
   return (
     <div className="feature-panel">
+      <TimelineBanner />
       <div>
         <h2 className="feature-title">Podcast Multi-Track Editor</h2>
         <p className="feature-description">
@@ -77,9 +79,9 @@ export function PodcastEditor() {
               </div>
             ))}
 
-            <Button onClick={handleApply} variant="success">
+            <ConfirmApply onConfirm={handleApply}>
               Apply Camera Switching
-            </Button>
+            </ConfirmApply>
           </div>
         </Card>
       )}

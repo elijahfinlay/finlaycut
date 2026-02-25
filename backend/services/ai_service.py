@@ -49,7 +49,7 @@ class AIService:
         async with httpx.AsyncClient(timeout=120.0) as client:
             messages = [{"role": "user", "content": prompt}]
             payload = {
-                "model": "claude-sonnet-4-20250514",
+                "model": "claude-sonnet-4-5-20250514",
                 "max_tokens": 4096,
                 "messages": messages,
             }

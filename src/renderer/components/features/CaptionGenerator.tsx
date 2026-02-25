@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { Button } from '../common/Button'
+import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
 import { Slider } from '../common/Slider'
 import { Toggle } from '../common/Toggle'
 import { Card } from '../common/Card'
@@ -70,6 +71,7 @@ export function CaptionGenerator() {
 
   return (
     <div className="feature-panel">
+      <TimelineBanner />
       <div>
         <h2 className="feature-title">Automated Captions</h2>
         <p className="feature-description">
@@ -187,9 +189,9 @@ export function CaptionGenerator() {
             </div>
 
             <div className="flex gap-3">
-              <Button onClick={handleApply} variant="success" loading={applying}>
+              <ConfirmApply onConfirm={handleApply} loading={applying}>
                 Apply to Timeline
-              </Button>
+              </ConfirmApply>
               <Button
                 variant="ghost"
                 onClick={() => navigator.clipboard.writeText(srtContent)}

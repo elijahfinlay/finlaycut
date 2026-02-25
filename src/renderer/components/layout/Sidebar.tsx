@@ -132,7 +132,7 @@ export function Sidebar() {
     <div className="w-56 bg-resolve-surface border-r border-resolve-border flex flex-col h-full">
       {/* Logo */}
       <div className="px-5 py-4 border-b border-resolve-border">
-        <h1 className="text-lg font-bold bg-gradient-to-r from-resolve-accent to-purple-400 bg-clip-text text-transparent">
+        <h1 className="text-lg font-bold bg-gradient-to-r from-resolve-accent to-sky-400 bg-clip-text text-transparent">
           FinlayCut
         </h1>
       </div>

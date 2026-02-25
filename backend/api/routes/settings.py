@@ -52,7 +52,7 @@ async def update_settings(update: SettingsUpdate):
         ai_service.set_backend(update.ai_backend)
 
     if update.claude_api_key is not None:
-        settings.claude_api_key = update.claude_api_key
+        settings.claude_api_key = update.claude_api_key if update.claude_api_key else None
 
     if update.ollama_model is not None:
         settings.ollama_model = update.ollama_model
@@ -73,7 +73,7 @@ async def update_settings(update: SettingsUpdate):
         settings.filler_words = update.filler_words
 
     if update.pexels_api_key is not None:
-        settings.pexels_api_key = update.pexels_api_key
+        settings.pexels_api_key = update.pexels_api_key if update.pexels_api_key else None
 
     if update.cache_limit_gb is not None:
         settings.cache_limit_gb = update.cache_limit_gb

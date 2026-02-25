@@ -31,10 +31,8 @@ async def enhance_audio():
         await manager.send_progress("audio_enhance", 0.5, "Applying enhancement...")
 
         # Apply Fairlight audio normalization if available
-        # The Resolve API supports applying Fairlight presets
         project = resolve_service.get_current_project()
         if project:
-            # Try to apply a normalization preset
             try:
                 project.ApplyFairlightPresetToCurrentTimeline("Dialogue Normalization")
             except Exception:
@@ -58,8 +56,15 @@ async def analyze_audio():
     if not resolve_service.connected:
         return {"error": "Not connected to DaVinci Resolve"}
 
-    clips = resolve_service.get_timeline_clips("audio", 1)
-    return {
-        "track_count": resolve_service.get_current_timeline().GetTrackCount("audio") if resolve_service.get_current_timeline() else 0,
-        "clip_count": len(clips) if clips else 0
-    }
+    try:
+        timeline = resolve_service.get_current_timeline()
+        track_count = 0
+        if timeline:
+            track_count = timeline.GetTrackCount("audio")
+        clips = resolve_service.get_timeline_clips("audio", 1)
+        return {
+            "track_count": track_count,
+            "clip_count": len(clips) if clips else 0
+        }
+    except Exception as e:
+        return {"error": str(e)}
