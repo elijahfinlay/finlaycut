@@ -1,0 +1,61 @@
+{
+  "name": "finlaycut",
+  "version": "0.1.0",
+  "description": "AI-powered video editing assistant for DaVinci Resolve",
+  "main": "./out/main/index.js",
+  "author": "Elijah Finlay",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "start": "electron-vite dev",
+    "postinstall": "electron-builder install-app-deps",
+    "build:mac": "electron-vite build && electron-builder --mac",
+    "lint": "eslint src/ --ext .ts,.tsx"
+  },
+  "dependencies": {
+    "@electron-toolkit/preload": "^3.0.1",
+    "@electron-toolkit/utils": "^3.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2",
+    "zustand": "^4.5.5",
+    "lucide-react": "^0.441.0",
+    "sonner": "^1.5.0",
+    "clsx": "^2.1.1"
+  },
+  "devDependencies": {
+    "@electron-toolkit/tsconfig": "^1.0.1",
+    "@types/react": "^18.3.9",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.20",
+    "electron": "^32.1.2",
+    "electron-builder": "^25.0.5",
+    "electron-vite": "^2.3.0",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.12",
+    "typescript": "^5.6.2",
+    "vite": "^5.4.7"
+  },
+  "build": {
+    "appId": "com.finlaycut.app",
+    "productName": "FinlayCut",
+    "mac": {
+      "target": "dmg",
+      "icon": "resources/icons/icon.icns"
+    },
+    "files": [
+      "out/**/*",
+      "backend/**/*",
+      "resources/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "backend",
+        "to": "backend"
+      }
+    ]
+  }
+}

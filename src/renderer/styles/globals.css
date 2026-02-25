@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    @apply bg-resolve-bg text-resolve-text;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-resolve-bg;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-resolve-border rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-resolve-textMuted;
+  }
+}
+
+@layer components {
+  .feature-panel {
+    @apply p-6 space-y-6;
+  }
+
+  .feature-title {
+    @apply text-xl font-semibold text-resolve-text;
+  }
+
+  .feature-description {
+    @apply text-sm text-resolve-textDim leading-relaxed;
+  }
+
+  .analyze-btn {
+    @apply px-6 py-2.5 bg-resolve-accent hover:bg-resolve-accentHover text-white font-medium rounded-lg
+           transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .apply-btn {
+    @apply px-6 py-2.5 bg-resolve-success/20 hover:bg-resolve-success/30 text-resolve-success font-medium rounded-lg
+           border border-resolve-success/30 transition-all duration-200
+           disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .section-card {
+    @apply bg-resolve-surface rounded-xl border border-resolve-border p-5;
+  }
+}
