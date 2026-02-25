@@ -10,6 +10,7 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
+  { id: 'transcript', label: 'Transcript Editor', icon: 'text-cursor', section: 'Features' },
   { id: 'silence', label: 'Silence Removal', icon: 'volume-x', section: 'Features' },
   { id: 'filler', label: 'Filler Words', icon: 'message-circle-x', section: 'Features' },
   { id: 'captions', label: 'Captions', icon: 'subtitles', section: 'Features' },
@@ -28,6 +29,11 @@ const NAV_ITEMS: NavItem[] = [
 function NavIcon({ name }: { name: string }) {
   // Simple SVG icon mapping
   const icons: Record<string, React.ReactNode> = {
+    'text-cursor': (
+      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M4 7V4h16v3M9 20h6M12 4v16" />
+      </svg>
+    ),
     'volume-x': (
       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
         <path strokeLinecap="round" strokeLinejoin="round" d="M11 5L6 9H2v6h4l5 4V5zM23 9l-6 6M17 9l6 6" />

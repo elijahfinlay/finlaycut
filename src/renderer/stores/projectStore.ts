@@ -25,7 +25,7 @@ export const useProjectStore = create<ProjectState>((set) => ({
   framerate: '',
   resolution: '',
   duration: 0,
-  activeFeature: 'silence',
+  activeFeature: 'transcript',
   setStatus: (status) =>
     set({
       connected: status.connected,

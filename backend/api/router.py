@@ -14,6 +14,7 @@ from api.routes import (
     thumbnail,
     settings as settings_route,
     undo,
+    transcript_editor,
 )
 
 api_router = APIRouter()
@@ -32,3 +33,4 @@ api_router.include_router(audio_enhance.router, prefix="/audio", tags=["audio"])
 api_router.include_router(thumbnail.router, prefix="/thumbnail", tags=["thumbnail"])
 api_router.include_router(settings_route.router, prefix="/settings", tags=["settings"])
 api_router.include_router(undo.router, prefix="/undo", tags=["undo"])
+api_router.include_router(transcript_editor.router, prefix="/transcript-editor", tags=["transcript-editor"])

@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react'
 import { Sidebar } from './components/layout/Sidebar'
 import { Header } from './components/layout/Header'
+import { TranscriptEditor } from './components/features/TranscriptEditor'
 import { SilenceRemoval } from './components/features/SilenceRemoval'
 import { FillerWordRemoval } from './components/features/FillerWordRemoval'
 import { CaptionGenerator } from './components/features/CaptionGenerator'
@@ -18,6 +19,7 @@ import { useResolveStatus } from './hooks/useResolveStatus'
 import { useProjectStore } from './stores/projectStore'
 
 const FEATURE_MAP: Record<string, React.ComponentType> = {
+  transcript: TranscriptEditor,
   silence: SilenceRemoval,
   filler: FillerWordRemoval,
   captions: CaptionGenerator,
