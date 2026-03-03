@@ -54,6 +54,10 @@ interface FeatureDataState {
   setTranscriptLanguage: (lang: string) => void
   setTranscriptContext: (context: TranscriptContext | null) => void
 
+  // Transcript Editor — waveform (survives page switches)
+  transcriptWaveform: { amplitudes: number[]; duration: number } | null
+  setTranscriptWaveform: (wf: { amplitudes: number[]; duration: number } | null) => void
+
   // Filler Word Removal
   fillerDetections: FillerDetection[]
   setFillerDetections: (detections: FillerDetection[]) => void
@@ -109,6 +113,10 @@ export const useFeatureDataStore = create<FeatureDataState>()(
       setTranscriptLanguage: (lang) => set({ transcriptLanguage: lang }),
       setTranscriptContext: (context) => set({ transcriptContext: context }),
 
+      // Waveform
+      transcriptWaveform: null,
+      setTranscriptWaveform: (wf) => set({ transcriptWaveform: wf }),
+
       // Filler
       fillerDetections: [],
       setFillerDetections: (detections) => set({ fillerDetections: detections }),
@@ -154,6 +162,7 @@ export const useFeatureDataStore = create<FeatureDataState>()(
         transcriptWords: [],
         transcriptLanguage: '',
         transcriptContext: null,
+        transcriptWaveform: null,
         fillerDetections: [],
         silenceSegments: [],
         silenceSettings: { threshold: -40, minDuration: 300, padding: 100 },
@@ -173,6 +182,7 @@ export const useFeatureDataStore = create<FeatureDataState>()(
         transcriptWords: state.transcriptWords,
         transcriptLanguage: state.transcriptLanguage,
         transcriptContext: state.transcriptContext,
+        transcriptWaveform: state.transcriptWaveform,
         fillerDetections: state.fillerDetections,
         silenceSegments: state.silenceSegments,
         silenceSettings: state.silenceSettings,

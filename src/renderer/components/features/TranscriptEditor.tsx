@@ -221,9 +221,13 @@ export function TranscriptEditor() {
     transcriptWords: storedWords,
     transcriptLanguage: storedLanguage,
     transcriptContext: storedContext,
+    transcriptWaveform: storedWaveform,
+    silenceSettings: storedSilenceSettings,
     setTranscriptWords: storeWords,
     setTranscriptLanguage: storeLanguage,
     setTranscriptContext: storeContext,
+    setTranscriptWaveform: storeWaveform,
+    setSilenceSettings: storeSilenceSettings,
   } = useFeatureDataStore()
 
   const [words, setWords] = useState<TranscriptWord[]>(
@@ -237,7 +241,7 @@ export function TranscriptEditor() {
   const [selectionAnchor, setSelectionAnchor] = useState<number | null>(null)
   const [dragStart, setDragStart] = useState<number | null>(null)
   const [isDragging, setIsDragging] = useState(false)
-  const [waveform, setWaveform] = useState<{ amplitudes: number[]; duration: number } | null>(null)
+  const [waveform, setWaveform] = useState<{ amplitudes: number[]; duration: number } | null>(storedWaveform)
   const [activeWordIndex, setActiveWordIndex] = useState<number | null>(null)
   const [isFollowing, setIsFollowing] = useState(true)
   const [showTimestamps, setShowTimestamps] = useState(false)
@@ -245,9 +249,9 @@ export function TranscriptEditor() {
   const [findingFillers, setFindingFillers] = useState(false)
   const [findingSilences, setFindingSilences] = useState(false)
   const [showSilenceSettings, setShowSilenceSettings] = useState(false)
-  const [silenceThreshold, setSilenceThreshold] = useState(-40) // dB
-  const [silenceMinDuration, setSilenceMinDuration] = useState(500) // ms
-  const [silencePadding, setSilencePadding] = useState(150) // ms — increased from 100 to better protect dialogue
+  const [silenceThreshold, setSilenceThreshold] = useState(storedSilenceSettings.threshold) // dB
+  const [silenceMinDuration, setSilenceMinDuration] = useState(storedSilenceSettings.minDuration) // ms
+  const [silencePadding, setSilencePadding] = useState(Math.max(storedSilenceSettings.padding, 150)) // ms — floor of 150 to protect dialogue
   const [autoDetectFillers, setAutoDetectFillers] = useState(true)
   const { framerate } = useProjectStore()
   const [operationBlocked, setOperationBlocked] = useState(false)
@@ -270,6 +274,16 @@ export function TranscriptEditor() {
   useEffect(() => {
     storeContext(transcriptContext)
   }, [transcriptContext, storeContext])
+
+  // Sync waveform to store so it survives page switches
+  useEffect(() => {
+    storeWaveform(waveform)
+  }, [waveform, storeWaveform])
+
+  // Sync silence settings to store
+  useEffect(() => {
+    storeSilenceSettings({ threshold: silenceThreshold, minDuration: silenceMinDuration, padding: silencePadding })
+  }, [silenceThreshold, silenceMinDuration, silencePadding, storeSilenceSettings])
 
   useEffect(() => {
     const handleWindowMouseUp = () => {
@@ -476,14 +490,27 @@ export function TranscriptEditor() {
         setResult({ error: data.error })
         toast.error(data.error)
       } else {
-        // Flag auto-detection so silence/filler detection runs after words state updates
+        const normalized = (data.words || []).map((word: any) => normalizeWord(word))
+        const ctx = data.transcript_context || null
+
+        // Write to store FIRST so data persists even if component unmounts
+        // (e.g. user switches to another page during transcription)
+        storeWords(normalized)
+        storeContext(ctx)
+
+        // Then update local state for the UI
         pendingAutoDetectRef.current = true
-        setWords((data.words || []).map((word: any) => normalizeWord(word)))
-        setTranscriptContext(data.transcript_context || null)
-        // Fetch waveform data in background
+        setWords(normalized)
+        setTranscriptContext(ctx)
+
+        // Fetch waveform data in background — also writes to store
         apiFetch('/api/waveform/analyze?samples=800', { method: 'POST' })
           .then((wf) => {
-            if (wf.amplitudes) setWaveform({ amplitudes: wf.amplitudes, duration: wf.duration })
+            if (wf.amplitudes) {
+              const waveformData = { amplitudes: wf.amplitudes, duration: wf.duration }
+              storeWaveform(waveformData)
+              setWaveform(waveformData)
+            }
           })
           .catch(() => {})
         if (range) {
