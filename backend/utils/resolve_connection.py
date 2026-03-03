@@ -3,10 +3,13 @@ Robust connection logic for DaVinci Resolve scripting API.
 Works with both Free and Studio versions via external scripting (Network mode).
 """
 
+import logging
 import sys
 import os
 import importlib.util
 import importlib.machinery
+
+logger = logging.getLogger("finlaycut.resolve_connection")
 
 
 def _load_dynamic(module_name: str, file_path: str):
@@ -50,14 +53,14 @@ def get_resolve():
             _load_source("DaVinciResolveScript", modules_path)
             import DaVinciResolveScript as bmd
         except Exception as e:
-            print(f"[ResolveConnection] Could not load DaVinciResolveScript: {e}")
+            logger.error("Could not load DaVinciResolveScript: %s", e)
             return None
 
     try:
         resolve = bmd.scriptapp("Resolve")
         return resolve
     except Exception as e:
-        print(f"[ResolveConnection] Could not connect to Resolve: {e}")
+        logger.error("Could not connect to Resolve: %s", e)
         return None
 
 
@@ -96,5 +99,5 @@ def get_project_info(resolve) -> dict | None:
             "current_timeline": timeline_info
         }
     except Exception as e:
-        print(f"[ResolveConnection] Error getting project info: {e}")
+        logger.error("Error getting project info: %s", e)
         return None

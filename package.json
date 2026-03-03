@@ -12,16 +12,17 @@
     "start": "electron-vite dev",
     "postinstall": "electron-builder install-app-deps",
     "build:mac": "electron-vite build && electron-builder --mac",
-    "lint": "eslint src/ --ext .ts,.tsx"
+    "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "typecheck": "npm run typecheck:web && npm run typecheck:node",
+    "lint": "npm run typecheck"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.1",
     "@electron-toolkit/utils": "^3.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.26.2",
     "zustand": "^4.5.5",
-    "lucide-react": "^0.441.0",
     "sonner": "^1.5.0",
     "clsx": "^2.1.1"
   },
@@ -48,7 +49,6 @@
     },
     "files": [
       "out/**/*",
-      "backend/**/*",
       "resources/**/*"
     ],
     "extraResources": [

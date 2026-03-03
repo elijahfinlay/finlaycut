@@ -1,8 +1,8 @@
 import React, { useState } from 'react'
+import { toast } from 'sonner'
 import { Button } from '../common/Button'
-import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
+import { ConfirmApply } from '../common/TimelineGuard'
 import { Slider } from '../common/Slider'
-import { Toggle } from '../common/Toggle'
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
@@ -18,7 +18,7 @@ export function CaptionGenerator() {
   const [generating, setGenerating] = useState(false)
   const [applying, setApplying] = useState(false)
   const [result, setResult] = useState<any>(null)
-  const { progress, message } = useProgress('captions')
+  const { progress, message, elapsed, eta } = useProgress('captions')
 
   const handleGenerate = async () => {
     setGenerating(true)
@@ -40,12 +40,14 @@ export function CaptionGenerator() {
       })
       if (data.error) {
         setResult({ error: data.error })
+        toast.error(data.error)
       } else {
         setCaptions(data.captions || [])
         setSrtContent(data.srt || '')
       }
     } catch (err: any) {
       setResult({ error: err.message })
+      toast.error(err.message)
     } finally {
       setGenerating(false)
     }
@@ -58,20 +60,34 @@ export function CaptionGenerator() {
         method: 'POST',
         body: JSON.stringify({
           captions,
-          style: { font_size: fontSize, position, animation }
+          style: { font_size: fontSize, position, animation },
+          srt: srtContent
         })
       })
       setResult(data)
+      if (data.success) toast.success(data.message || 'Captions applied successfully')
+      else if (data.error) toast.error(data.error)
     } catch (err: any) {
       setResult({ error: err.message })
+      toast.error(err.message)
     } finally {
       setApplying(false)
     }
   }
 
+  const handleJumpToCaption = async (seconds: number) => {
+    try {
+      await apiFetch('/api/resolve/playhead', {
+        method: 'POST',
+        body: JSON.stringify({ seconds })
+      })
+    } catch {
+      // Ignore jump errors
+    }
+  }
+
   return (
     <div className="feature-panel">
-      <TimelineBanner />
       <div>
         <h2 className="feature-title">Automated Captions</h2>
         <p className="feature-description">
@@ -163,24 +179,28 @@ export function CaptionGenerator() {
         Generate Captions
       </Button>
 
-      {generating && <ProgressBar progress={progress} message={message} />}
+      {generating && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
 
       {/* Caption Preview */}
       {captions.length > 0 && (
         <Card>
           <div className="space-y-4">
-            <h3 className="text-sm font-semibold text-resolve-text">
-              Preview ({captions.length} captions)
-            </h3>
-            <div className="max-h-64 overflow-y-auto space-y-1 font-mono text-sm">
-              {captions.slice(0, 30).map((cap, i) => (
-                <div key={i} className="flex items-center gap-3 px-3 py-1.5 rounded bg-resolve-bg">
-                  <span className="text-resolve-textMuted text-xs w-16 flex-shrink-0">
-                    {formatTime(cap.start)}
-                  </span>
-                  <span className="text-resolve-text">{cap.text}</span>
-                </div>
-              ))}
+              <h3 className="text-sm font-semibold text-resolve-text">
+                Preview ({captions.length} captions)
+              </h3>
+              <div className="max-h-64 overflow-y-auto space-y-1 font-mono text-sm">
+                {captions.slice(0, 30).map((cap, i) => (
+                  <button
+                    key={i}
+                    onClick={() => handleJumpToCaption(cap.start)}
+                    className="w-full flex items-center gap-3 px-3 py-1.5 rounded bg-resolve-bg hover:bg-resolve-surfaceLight text-left transition-colors"
+                  >
+                    <span className="text-resolve-textMuted text-xs w-16 flex-shrink-0">
+                      {formatTime(cap.start)}
+                    </span>
+                    <span className="text-resolve-text">{cap.text}</span>
+                  </button>
+                ))}
               {captions.length > 30 && (
                 <p className="text-resolve-textMuted text-xs px-3">
                   ...and {captions.length - 30} more

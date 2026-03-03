@@ -1,26 +1,29 @@
 """Settings management endpoints."""
 
+import logging
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from config import settings
 from services.ai_service import ai_service
 
+logger = logging.getLogger("finlaycut.settings")
 router = APIRouter()
 
 
 class SettingsUpdate(BaseModel):
     ai_backend: Optional[str] = None
     claude_api_key: Optional[str] = None
+    claude_model: Optional[str] = None
     ollama_model: Optional[str] = None
     whisper_model: Optional[str] = None
-    silence_threshold_db: Optional[int] = None
-    silence_min_duration_ms: Optional[int] = None
-    silence_padding_ms: Optional[int] = None
+    silence_threshold_db: Optional[int] = Field(None, ge=-80, le=0)
+    silence_min_duration_ms: Optional[int] = Field(None, ge=50, le=10000)
+    silence_padding_ms: Optional[int] = Field(None, ge=0, le=5000)
     filler_words: Optional[list[str]] = None
     pexels_api_key: Optional[str] = None
-    cache_limit_gb: Optional[float] = None
-    backup_retention_days: Optional[int] = None
+    cache_limit_gb: Optional[float] = Field(None, gt=0, le=100)
+    backup_retention_days: Optional[int] = Field(None, ge=1, le=365)
 
 
 @router.get("/")
@@ -32,6 +35,7 @@ async def get_settings():
         "ai_backend": settings.ai_backend,
         "ollama_available": ollama_available,
         "ollama_model": settings.ollama_model,
+        "claude_model": settings.claude_model,
         "has_claude_key": bool(settings.claude_api_key),
         "whisper_model": settings.whisper_model,
         "silence_threshold_db": settings.silence_threshold_db,
@@ -53,6 +57,9 @@ async def update_settings(update: SettingsUpdate):
 
     if update.claude_api_key is not None:
         settings.claude_api_key = update.claude_api_key if update.claude_api_key else None
+
+    if update.claude_model is not None:
+        settings.claude_model = update.claude_model
 
     if update.ollama_model is not None:
         settings.ollama_model = update.ollama_model
@@ -80,6 +87,9 @@ async def update_settings(update: SettingsUpdate):
 
     if update.backup_retention_days is not None:
         settings.backup_retention_days = update.backup_retention_days
+
+    settings.save_to_disk()
+    logger.info("Settings updated and saved to disk")
 
     return {"success": True, "message": "Settings updated"}
 

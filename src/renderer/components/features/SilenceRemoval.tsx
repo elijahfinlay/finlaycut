@@ -1,11 +1,13 @@
-import React, { useState } from 'react'
+import React, { useState, useRef, useEffect } from 'react'
+import { toast } from 'sonner'
 import { Button } from '../common/Button'
 import { Slider } from '../common/Slider'
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
-import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
+import { ConfirmApply } from '../common/TimelineGuard'
 import { apiFetch } from '../../hooks/useApi'
 import { useProgress } from '../../hooks/useWebSocket'
+import { useFeatureDataStore } from '../../stores/featureDataStore'
 
 interface SilenceSegment {
   start: number
@@ -15,19 +17,40 @@ interface SilenceSegment {
 }
 
 export function SilenceRemoval() {
-  const [threshold, setThreshold] = useState(-40)
-  const [minDuration, setMinDuration] = useState(300)
-  const [padding, setPadding] = useState(100)
-  const [segments, setSegments] = useState<SilenceSegment[]>([])
+  const {
+    silenceSegments: storedSegments,
+    silenceSettings: storedSettings,
+    setSilenceSegments: storeSegments,
+    setSilenceSettings: storeSettings,
+  } = useFeatureDataStore()
+
+  const [threshold, setThreshold] = useState(storedSettings.threshold)
+  const [minDuration, setMinDuration] = useState(storedSettings.minDuration)
+  const [padding, setPadding] = useState(storedSettings.padding)
+  const [segments, setSegments] = useState<SilenceSegment[]>(storedSegments)
   const [analyzing, setAnalyzing] = useState(false)
   const [applying, setApplying] = useState(false)
   const [result, setResult] = useState<any>(null)
-  const { progress, message } = useProgress('silence')
+  const { progress, message, elapsed, eta } = useProgress('silence')
+  const abortRef = useRef<AbortController | null>(null)
+
+  // Persist across tab switches
+  useEffect(() => {
+    storeSegments(segments)
+  }, [segments, storeSegments])
+
+  useEffect(() => {
+    storeSettings({ threshold, minDuration, padding })
+  }, [threshold, minDuration, padding, storeSettings])
 
   const handleAnalyze = async () => {
     setAnalyzing(true)
     setSegments([])
     setResult(null)
+
+    const controller = new AbortController()
+    abortRef.current = controller
+
     try {
       const data = await apiFetch('/api/silence/analyze', {
         method: 'POST',
@@ -35,18 +58,33 @@ export function SilenceRemoval() {
           threshold_db: threshold,
           min_duration_ms: minDuration,
           padding_ms: padding
-        })
+        }),
+        signal: controller.signal
       })
       if (data.error) {
         setResult({ error: data.error })
+        toast.error(data.error)
       } else {
         setSegments(data.segments || [])
         setResult(data)
       }
     } catch (err: any) {
-      setResult({ error: err.message })
+      if (err.name === 'AbortError') {
+        setResult({ error: 'Analysis cancelled' })
+        toast.error('Analysis cancelled')
+      } else {
+        setResult({ error: err.message })
+        toast.error(err.message)
+      }
     } finally {
       setAnalyzing(false)
+      abortRef.current = null
+    }
+  }
+
+  const handleCancel = () => {
+    if (abortRef.current) {
+      abortRef.current.abort()
     }
   }
 
@@ -61,10 +99,24 @@ export function SilenceRemoval() {
         })
       })
       setResult(data)
+      if (data.success) toast.success(data.message || 'Silence removed successfully')
+      else if (data.error) toast.error(data.error)
     } catch (err: any) {
       setResult({ error: err.message })
+      toast.error(err.message)
     } finally {
       setApplying(false)
+    }
+  }
+
+  const handleJumpToSegment = async (seg: SilenceSegment) => {
+    try {
+      await apiFetch('/api/resolve/playhead', {
+        method: 'POST',
+        body: JSON.stringify({ seconds: seg.start })
+      })
+    } catch {
+      // Silently fail
     }
   }
 
@@ -72,6 +124,7 @@ export function SilenceRemoval() {
     setSegments((prev) =>
       prev.map((s, i) => (i === index ? { ...s, selected: !s.selected } : s))
     )
+    handleJumpToSegment(segments[index])
   }
 
   const selectedCount = segments.filter((s) => s.selected).length
@@ -81,8 +134,6 @@ export function SilenceRemoval() {
 
   return (
     <div className="feature-panel">
-      <TimelineBanner />
-
       <div>
         <h2 className="feature-title">Silence Removal</h2>
         <p className="feature-description">
@@ -124,12 +175,18 @@ export function SilenceRemoval() {
       </Card>
 
       {/* Analyze Button */}
-      <Button onClick={handleAnalyze} loading={analyzing} size="lg">
-        Analyze
-      </Button>
+      {analyzing ? (
+        <Button onClick={handleCancel} variant="ghost" size="lg">
+          Cancel
+        </Button>
+      ) : (
+        <Button onClick={handleAnalyze} loading={analyzing} size="lg">
+          Analyze
+        </Button>
+      )}
 
       {/* Progress */}
-      {analyzing && <ProgressBar progress={progress} message={message} />}
+      {analyzing && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
 
       {/* Results */}
       {segments.length > 0 && (

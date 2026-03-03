@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
+import { toast } from 'sonner'
 import { Button } from '../common/Button'
-import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
+
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
@@ -20,7 +21,7 @@ export function ViralClipDetector() {
   const [clips, setClips] = useState<ViralClip[]>([])
   const [detecting, setDetecting] = useState(false)
   const [result, setResult] = useState<any>(null)
-  const { progress, message } = useProgress('viral')
+  const { progress, message, elapsed, eta } = useProgress('viral')
 
   const handleDetect = async () => {
     setDetecting(true)
@@ -30,11 +31,13 @@ export function ViralClipDetector() {
       const data = await apiFetch('/api/viral/detect', { method: 'POST' })
       if (data.error) {
         setResult({ error: data.error })
+        toast.error(data.error)
       } else {
         setClips(data.clips || [])
       }
     } catch (err: any) {
       setResult({ error: err.message })
+      toast.error(err.message)
     } finally {
       setDetecting(false)
     }
@@ -53,14 +56,27 @@ export function ViralClipDetector() {
         body: JSON.stringify(clip)
       })
       setResult(data)
+      if (data.success) toast.success(data.message || 'Viral clip created')
+      else if (data.error) toast.error(data.error)
     } catch (err: any) {
       setResult({ error: err.message })
+      toast.error(err.message)
+    }
+  }
+
+  const handleJumpToClip = async (seconds: number) => {
+    try {
+      await apiFetch('/api/resolve/playhead', {
+        method: 'POST',
+        body: JSON.stringify({ seconds })
+      })
+    } catch {
+      // Ignore jump errors
     }
   }
 
   return (
     <div className="feature-panel">
-      <TimelineBanner />
       <div>
         <h2 className="feature-title">Viral Clip Detection</h2>
         <p className="feature-description">
@@ -73,7 +89,7 @@ export function ViralClipDetector() {
         Find Viral Clips
       </Button>
 
-      {detecting && <ProgressBar progress={progress} message={message} />}
+      {detecting && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
 
       {clips.length > 0 && (
         <div className="space-y-3">
@@ -81,7 +97,10 @@ export function ViralClipDetector() {
             <Card
               key={i}
               className={clip.selected ? 'border-resolve-accent/30' : ''}
-              onClick={() => toggleClip(i)}
+              onClick={() => {
+                toggleClip(i)
+                handleJumpToClip(clip.start_seconds)
+              }}
             >
               <div className="flex items-start justify-between">
                 <div className="flex-1">

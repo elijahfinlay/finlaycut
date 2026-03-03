@@ -20,6 +20,7 @@ const listeners = new Set<Listener>()
 let ws: WebSocket | null = null
 let wsConnected = false
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let reconnectDelay = 1000
 
 function connectWs() {
   try {
@@ -28,6 +29,7 @@ function connectWs() {
 
     ws.onopen = () => {
       wsConnected = true
+      reconnectDelay = 1000 // reset on successful connect
     }
 
     ws.onmessage = (event) => {
@@ -42,14 +44,16 @@ function connectWs() {
     ws.onclose = () => {
       wsConnected = false
       ws = null
-      reconnectTimer = setTimeout(connectWs, 3000)
+      reconnectTimer = setTimeout(connectWs, reconnectDelay)
+      reconnectDelay = Math.min(reconnectDelay * 2, 30000) // backoff: 1→2→4→8→...→30s
     }
 
     ws.onerror = () => {
       ws?.close()
     }
   } catch {
-    reconnectTimer = setTimeout(connectWs, 3000)
+    reconnectTimer = setTimeout(connectWs, reconnectDelay)
+    reconnectDelay = Math.min(reconnectDelay * 2, 30000)
   }
 }
 
@@ -85,37 +89,76 @@ export function useProgress(operation: string) {
   const [message, setMessage] = useState('')
   const [isComplete, setIsComplete] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [startTime, setStartTime] = useState<number | null>(null)
+  const [elapsed, setElapsed] = useState(0)
+  const [eta, setEta] = useState<number | null>(null)
+  const stalledCountRef = useRef(0)
+  const lastProgressRef = useRef(0)
 
   useEffect(() => {
     const unsub = subscribe((msg) => {
       if (msg.operation !== operation) return
 
       switch (msg.type) {
-        case 'progress':
-          setProgress(msg.progress || 0)
+        case 'progress': {
+          const p = msg.progress || 0
+          const now = Date.now()
+
+          // Detect stalled progress (same value for 3+ consecutive updates)
+          if (Math.abs(p - lastProgressRef.current) < 0.001) {
+            stalledCountRef.current++
+          } else {
+            stalledCountRef.current = 0
+          }
+          lastProgressRef.current = p
+          const isStalled = stalledCountRef.current >= 3
+
+          if (startTime === null || p < 0.01) {
+            setStartTime(now)
+            setElapsed(0)
+            setEta(null)
+            stalledCountRef.current = 0
+          } else {
+            const elapsedMs = now - (startTime ?? now)
+            setElapsed(elapsedMs)
+            if (isStalled) {
+              // Progress isn't advancing — hide ETA, show only elapsed
+              setEta(null)
+            } else if (p > 0.05) {
+              setEta((elapsedMs / p) * (1 - p))
+            }
+          }
+
+          setProgress(p)
           setMessage(msg.message || '')
           setIsComplete(false)
           setError(null)
           break
+        }
         case 'complete':
           setProgress(1)
           setIsComplete(true)
           setError(null)
+          setEta(null)
           break
         case 'error':
           setError(msg.error || 'Unknown error')
+          setEta(null)
           break
       }
     })
     return unsub
-  }, [operation])
+  }, [operation, startTime])
 
   const reset = useCallback(() => {
     setProgress(0)
     setMessage('')
     setIsComplete(false)
     setError(null)
+    setStartTime(null)
+    setElapsed(0)
+    setEta(null)
   }, [])
 
-  return { progress, message, isComplete, error, reset }
+  return { progress, message, isComplete, error, reset, elapsed, eta }
 }

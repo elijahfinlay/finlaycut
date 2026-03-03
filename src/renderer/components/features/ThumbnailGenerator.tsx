@@ -1,10 +1,11 @@
 import React, { useState } from 'react'
+import { toast } from 'sonner'
 import { Button } from '../common/Button'
-import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
+
 import { Slider } from '../common/Slider'
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
-import { apiFetch } from '../../hooks/useApi'
+import { apiFetch, getBaseUrl } from '../../hooks/useApi'
 import { useProgress } from '../../hooks/useWebSocket'
 
 export function ThumbnailGenerator() {
@@ -12,7 +13,7 @@ export function ThumbnailGenerator() {
   const [thumbnails, setThumbnails] = useState<any[]>([])
   const [generating, setGenerating] = useState(false)
   const [result, setResult] = useState<any>(null)
-  const { progress, message } = useProgress('thumbnail')
+  const { progress, message, elapsed, eta } = useProgress('thumbnail')
 
   const handleGenerate = async () => {
     setGenerating(true)
@@ -24,19 +25,31 @@ export function ThumbnailGenerator() {
       })
       if (data.error) {
         setResult({ error: data.error })
+        toast.error(data.error)
       } else {
         setThumbnails(data.thumbnails || [])
       }
     } catch (err: any) {
       setResult({ error: err.message })
+      toast.error(err.message)
     } finally {
       setGenerating(false)
     }
   }
 
+  const handleJumpToTime = async (seconds: number) => {
+    try {
+      await apiFetch('/api/resolve/playhead', {
+        method: 'POST',
+        body: JSON.stringify({ seconds })
+      })
+    } catch {
+      // Ignore jump errors
+    }
+  }
+
   return (
     <div className="feature-panel">
-      <TimelineBanner />
       <div>
         <h2 className="feature-title">AI Thumbnail Generator</h2>
         <p className="feature-description">
@@ -60,7 +73,7 @@ export function ThumbnailGenerator() {
         Generate Thumbnails
       </Button>
 
-      {generating && <ProgressBar progress={progress} message={message} />}
+      {generating && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
 
       {thumbnails.length > 0 && (
         <Card>
@@ -70,11 +83,22 @@ export function ThumbnailGenerator() {
           <div className="grid grid-cols-2 gap-3">
             {thumbnails.map((thumb, i) => (
               <div key={i} className="space-y-1">
-                <div className="aspect-video bg-resolve-bg rounded-lg overflow-hidden border border-resolve-border hover:border-resolve-accent/50 transition-colors cursor-pointer">
-                  <div className="w-full h-full flex items-center justify-center text-resolve-textMuted text-xs">
-                    Frame @ {formatTime(thumb.time_seconds)}
-                  </div>
-                </div>
+                <button
+                  onClick={() => handleJumpToTime(thumb.time_seconds)}
+                  className="w-full aspect-video bg-resolve-bg rounded-lg overflow-hidden border border-resolve-border hover:border-resolve-accent/50 transition-colors cursor-pointer"
+                >
+                  {thumb.path ? (
+                    <img
+                      src={`${getBaseUrl()}/api/thumbnail/serve/${encodeURIComponent(thumb.path.split('/').pop() || '')}`}
+                      alt={`Frame at ${formatTime(thumb.time_seconds)}`}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center text-resolve-textMuted text-xs">
+                      Frame @ {formatTime(thumb.time_seconds)}
+                    </div>
+                  )}
+                </button>
                 <p className="text-xs text-resolve-textMuted text-center font-mono">
                   {formatTime(thumb.time_seconds)}
                 </p>

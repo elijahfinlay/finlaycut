@@ -25,6 +25,30 @@ def _save_history(history: list[dict]):
         json.dump(history, f, indent=2)
 
 
+def _record(operation: str, backup_timeline_name: str, description: str = ""):
+    """
+    Internal helper — record an operation in the undo history.
+    Called directly from apply routes so the backup timeline name is always saved.
+    """
+    timeline = resolve_service.get_current_timeline()
+    timeline_name = timeline.GetName() if timeline else "unknown"
+
+    entry = {
+        "id": f"undo_{int(time.time() * 1000)}",
+        "operation": operation,
+        "timestamp": time.time(),
+        "timeline_name": timeline_name,
+        "backup_timeline_name": backup_timeline_name,
+        "description": description
+    }
+
+    history = _load_history()
+    history.insert(0, entry)
+    history = history[:50]
+    _save_history(history)
+    return entry
+
+
 @router.get("/history")
 async def get_undo_history():
     """Get the undo/backup history."""
@@ -33,27 +57,9 @@ async def get_undo_history():
 
 
 @router.post("/record")
-async def record_operation(operation: str, description: str = ""):
-    """Record an operation in the undo history."""
-    timeline = resolve_service.get_current_timeline()
-    if timeline is None:
-        return {"error": "No active timeline"}
-
-    entry = {
-        "id": f"undo_{int(time.time())}",
-        "operation": operation,
-        "timestamp": time.time(),
-        "timeline_name": timeline.GetName(),
-        "description": description
-    }
-
-    history = _load_history()
-    history.insert(0, entry)
-
-    # Keep last 50 entries
-    history = history[:50]
-    _save_history(history)
-
+async def record_operation(operation: str, backup_timeline_name: str = "", description: str = ""):
+    """Record an operation in the undo history (HTTP endpoint)."""
+    entry = _record(operation, backup_timeline_name, description)
     return {"success": True, "entry": entry}
 
 

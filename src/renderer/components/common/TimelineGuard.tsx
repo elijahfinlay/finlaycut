@@ -24,7 +24,7 @@ export function TimelineBanner() {
           Not connected to DaVinci Resolve
         </span>
         <span className="text-xs text-resolve-textMuted">
-          — Open Resolve and make sure external scripting is set to Network
+          — Open Resolve and make sure external scripting is set to Local
         </span>
       </div>
     )
@@ -61,14 +61,22 @@ export function TimelineBanner() {
 }
 
 interface ConfirmApplyProps {
-  onConfirm: () => void
+  onConfirm: () => void | Promise<void>
   loading?: boolean
   disabled?: boolean
+  size?: 'sm' | 'md' | 'lg'
   children: React.ReactNode
   description?: string
 }
 
-export function ConfirmApply({ onConfirm, loading, disabled, children, description }: ConfirmApplyProps) {
+export function ConfirmApply({
+  onConfirm,
+  loading,
+  disabled,
+  size = 'lg',
+  children,
+  description
+}: ConfirmApplyProps) {
   const [showConfirm, setShowConfirm] = useState(false)
   const { timelineName, projectName } = useProjectStore()
 
@@ -83,7 +91,7 @@ export function ConfirmApply({ onConfirm, loading, disabled, children, descripti
 
   return (
     <>
-      <Button onClick={handleClick} variant="success" loading={loading} disabled={disabled} size="lg">
+      <Button onClick={handleClick} variant="success" loading={loading} disabled={disabled} size={size}>
         {children}
       </Button>
 

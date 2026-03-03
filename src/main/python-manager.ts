@@ -5,13 +5,15 @@ import { is } from '@electron-toolkit/utils'
 import * as net from 'net'
 
 const BACKEND_PORT = 42069
-const HEALTH_CHECK_INTERVAL = 3000
-const MAX_START_RETRIES = 30
+const MAX_RESTART_ATTEMPTS = 3
+const RESTART_DELAY_MS = 2000
 
 export class PythonManager {
   private process: ChildProcess | null = null
-  private healthCheckTimer: NodeJS.Timeout | null = null
   private _isRunning = false
+  private _isStopping = false
+  private _restartCount = 0
+  private _restartTimer: NodeJS.Timeout | null = null
 
   get isRunning(): boolean {
     return this._isRunning
@@ -29,14 +31,52 @@ export class PythonManager {
   }
 
   private getPythonPath(): string {
-    // Try common Python paths on macOS
-    const candidates = [
-      'python3',
-      '/opt/homebrew/bin/python3',
-      '/usr/local/bin/python3',
-      '/usr/bin/python3'
+    const backendPath = this.getBackendPath()
+    const fs = require('fs')
+
+    // Prefer the project's virtual environment python
+    const venvCandidates = [
+      join(backendPath, '.venv', 'bin', 'python3'),
+      join(backendPath, '.venv', 'bin', 'python'),
+      join(backendPath, 'venv', 'bin', 'python3'),
+      join(backendPath, 'venv', 'bin', 'python'),
     ]
-    return candidates[0] // spawn will search PATH for 'python3'
+
+    for (const p of venvCandidates) {
+      try {
+        if (fs.existsSync(p)) {
+          this.safeLog(`[PythonManager] Found venv Python: ${p}`)
+          return p
+        }
+      } catch {
+        // keep searching
+      }
+    }
+
+    // Fall back to system Python
+    this.safeLog('[PythonManager] No venv found, falling back to system python3')
+    return 'python3'
+  }
+
+  /**
+   * Safe console.log that swallows EPIPE errors.
+   * When Electron's stdout pipe breaks (e.g. dev server dies), console.log
+   * throws EPIPE which would crash the whole app if unhandled.
+   */
+  private safeLog(...args: any[]): void {
+    try {
+      console.log(...args)
+    } catch {
+      // EPIPE or other write error — swallow it
+    }
+  }
+
+  private safeError(...args: any[]): void {
+    try {
+      console.error(...args)
+    } catch {
+      // EPIPE — swallow
+    }
   }
 
   async start(): Promise<void> {
@@ -44,86 +84,131 @@ export class PythonManager {
 
     const backendPath = this.getBackendPath()
     const pythonPath = this.getPythonPath()
+    const debugCuts = process.env.FINLAYCUT_DEBUG_CUT_PLANNING ?? (is.dev ? '1' : '0')
+    const debugLogLimit = process.env.FINLAYCUT_DEBUG_LOG_LIMIT ?? '20'
 
-    console.log(`[PythonManager] Starting backend from: ${backendPath}`)
-    console.log(`[PythonManager] Using Python: ${pythonPath}`)
+    this.safeLog(`[PythonManager] Starting backend from: ${backendPath}`)
+    this.safeLog(`[PythonManager] Using Python: ${pythonPath}`)
+    this.safeLog(`[PythonManager] Cut debug logging: ${debugCuts === '1' ? 'enabled' : 'disabled'}`)
+
+    // Ensure /opt/homebrew/bin is on PATH — Electron strips shell profile paths
+    const currentPath = process.env.PATH || ''
+    const extraPaths = ['/opt/homebrew/bin', '/usr/local/bin']
+    const patchedPath = [...extraPaths.filter((p) => !currentPath.includes(p)), currentPath]
+      .filter(Boolean)
+      .join(':')
 
     this.process = spawn(pythonPath, ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT)], {
       cwd: backendPath,
       env: {
         ...process.env,
+        PATH: patchedPath,
         PYTHONPATH: backendPath,
         RESOLVE_SCRIPT_API: '/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting',
-        RESOLVE_SCRIPT_LIB: '/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so'
+        RESOLVE_SCRIPT_LIB: '/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so',
+        FINLAYCUT_DEBUG_CUT_PLANNING: debugCuts,
+        FINLAYCUT_DEBUG_LOG_LIMIT: debugLogLimit
       },
       stdio: ['pipe', 'pipe', 'pipe']
     })
 
+    // Pipe child stdout/stderr with EPIPE-safe logging
     this.process.stdout?.on('data', (data: Buffer) => {
-      console.log(`[Backend] ${data.toString().trim()}`)
+      this.safeLog(`[Backend] ${data.toString().trim()}`)
+    })
+    this.process.stdout?.on('error', () => {
+      // Pipe error (process died) — ignore
     })
 
     this.process.stderr?.on('data', (data: Buffer) => {
-      console.log(`[Backend:err] ${data.toString().trim()}`)
+      this.safeLog(`[Backend:err] ${data.toString().trim()}`)
+    })
+    this.process.stderr?.on('error', () => {
+      // Pipe error (process died) — ignore
+    })
+
+    // Also handle stdin pipe errors (if anything ever writes to it)
+    this.process.stdin?.on('error', () => {
+      // Pipe error — ignore
     })
 
     this.process.on('exit', (code) => {
-      console.log(`[PythonManager] Backend exited with code ${code}`)
+      this.safeLog(`[PythonManager] Backend exited with code ${code}`)
       this._isRunning = false
+
+      // Auto-restart if we didn't intentionally stop it
+      if (!this._isStopping && this._restartCount < MAX_RESTART_ATTEMPTS) {
+        this._restartCount++
+        this.safeLog(
+          `[PythonManager] Unexpected exit — auto-restarting (attempt ${this._restartCount}/${MAX_RESTART_ATTEMPTS})...`
+        )
+        this._restartTimer = setTimeout(() => {
+          this.start().catch((err) => {
+            this.safeError('[PythonManager] Auto-restart failed:', err)
+          })
+        }, RESTART_DELAY_MS)
+      } else if (!this._isStopping) {
+        this.safeError('[PythonManager] Backend crashed too many times, giving up')
+      }
     })
 
     this.process.on('error', (err) => {
-      console.error(`[PythonManager] Failed to start backend:`, err)
+      this.safeError(`[PythonManager] Failed to start backend:`, err)
       this._isRunning = false
     })
 
     // Wait for the server to be ready
     await this.waitForReady()
     this._isRunning = true
-    console.log(`[PythonManager] Backend is ready on port ${BACKEND_PORT}`)
+    this._restartCount = 0 // Reset on successful start
+    this.safeLog(`[PythonManager] Backend is ready on port ${BACKEND_PORT}`)
   }
 
   private async waitForReady(): Promise<void> {
-    for (let i = 0; i < MAX_START_RETRIES; i++) {
+    const MAX_RETRIES = 15
+    let delay = 200 // start fast, then back off
+    for (let i = 0; i < MAX_RETRIES; i++) {
       try {
-        const isReady = await this.checkPort()
+        const isReady = await this.checkHealth()
         if (isReady) return
       } catch {
-        // Port not ready yet
+        // Not ready yet
       }
-      await new Promise((resolve) => setTimeout(resolve, 1000))
+      await new Promise((resolve) => setTimeout(resolve, delay))
+      delay = Math.min(delay * 1.5, 1000) // exponential backoff, cap at 1s
     }
-    console.warn('[PythonManager] Backend did not start within expected time, continuing anyway')
+    this.safeLog('[PythonManager] Backend did not start within expected time, continuing anyway')
   }
 
-  private checkPort(): Promise<boolean> {
-    return new Promise((resolve) => {
-      const socket = new net.Socket()
-      socket.setTimeout(1000)
-      socket.on('connect', () => {
-        socket.destroy()
-        resolve(true)
+  private async checkHealth(): Promise<boolean> {
+    try {
+      const http = require('http')
+      return new Promise((resolve) => {
+        const req = http.get(`http://127.0.0.1:${BACKEND_PORT}/health`, { timeout: 1000 }, (res: any) => {
+          resolve(res.statusCode === 200)
+          res.resume()
+        })
+        req.on('error', () => resolve(false))
+        req.on('timeout', () => {
+          req.destroy()
+          resolve(false)
+        })
       })
-      socket.on('timeout', () => {
-        socket.destroy()
-        resolve(false)
-      })
-      socket.on('error', () => {
-        socket.destroy()
-        resolve(false)
-      })
-      socket.connect(BACKEND_PORT, '127.0.0.1')
-    })
+    } catch {
+      return false
+    }
   }
 
   async stop(): Promise<void> {
-    if (this.healthCheckTimer) {
-      clearInterval(this.healthCheckTimer)
-      this.healthCheckTimer = null
+    this._isStopping = true
+
+    if (this._restartTimer) {
+      clearTimeout(this._restartTimer)
+      this._restartTimer = null
     }
 
     if (this.process) {
-      console.log('[PythonManager] Stopping backend...')
+      this.safeLog('[PythonManager] Stopping backend...')
       this.process.kill('SIGTERM')
 
       // Give it 5 seconds to shut down gracefully
@@ -143,7 +228,7 @@ export class PythonManager {
 
       this.process = null
       this._isRunning = false
-      console.log('[PythonManager] Backend stopped')
+      this.safeLog('[PythonManager] Backend stopped')
     }
   }
 }

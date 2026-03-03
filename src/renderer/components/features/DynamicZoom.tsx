@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
+import { toast } from 'sonner'
 import { Button } from '../common/Button'
-import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
+import { ConfirmApply } from '../common/TimelineGuard'
 import { Slider } from '../common/Slider'
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
@@ -25,7 +26,7 @@ export function DynamicZoom() {
   const [analyzing, setAnalyzing] = useState(false)
   const [applying, setApplying] = useState(false)
   const [result, setResult] = useState<any>(null)
-  const { progress, message } = useProgress('zoom')
+  const { progress, message, elapsed, eta } = useProgress('zoom')
 
   const handleAnalyze = async () => {
     setAnalyzing(true)
@@ -43,11 +44,13 @@ export function DynamicZoom() {
       })
       if (data.error) {
         setResult({ error: data.error })
+        toast.error(data.error)
       } else {
         setPoints(data.zoom_points || [])
       }
     } catch (err: any) {
       setResult({ error: err.message })
+      toast.error(err.message)
     } finally {
       setAnalyzing(false)
     }
@@ -61,8 +64,11 @@ export function DynamicZoom() {
         body: JSON.stringify({ zoom_points: points })
       })
       setResult(data)
+      if (data.success) toast.success(`Applied ${data.applied_count} zoom effects`)
+      else if (data.error) toast.error(data.error)
     } catch (err: any) {
       setResult({ error: err.message })
+      toast.error(err.message)
     } finally {
       setApplying(false)
     }
@@ -72,13 +78,24 @@ export function DynamicZoom() {
     setPoints((prev) =>
       prev.map((p, i) => (i === index ? { ...p, selected: !p.selected } : p))
     )
+    handleJumpToPoint(points[index]?.time ?? 0)
+  }
+
+  const handleJumpToPoint = async (seconds: number) => {
+    try {
+      await apiFetch('/api/resolve/playhead', {
+        method: 'POST',
+        body: JSON.stringify({ seconds })
+      })
+    } catch {
+      // Ignore jump errors
+    }
   }
 
   const selectedCount = points.filter((p) => p.selected).length
 
   return (
     <div className="feature-panel">
-      <TimelineBanner />
       <div>
         <h2 className="feature-title">Dynamic Zoom Cuts</h2>
         <p className="feature-description">
@@ -130,7 +147,7 @@ export function DynamicZoom() {
         Analyze
       </Button>
 
-      {analyzing && <ProgressBar progress={progress} message={message} />}
+      {analyzing && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
 
       {points.length > 0 && (
         <Card>

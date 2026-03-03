@@ -1,14 +1,18 @@
 """Dynamic zoom cuts endpoints."""
 
+import logging
 from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Optional
 from services.resolve_service import resolve_service
 from services.audio_service import audio_service
 from services.video_service import video_service
-from utils.audio_utils import extract_audio
+from utils.audio_utils import extract_audio, extract_audio_segment
 from utils.time_utils import seconds_to_frames
+from utils.operation_queue import heavy_operation
 from api.websocket import manager
+
+logger = logging.getLogger("finlaycut.zoom")
 
 router = APIRouter()
 
@@ -25,22 +29,40 @@ class ZoomApplyRequest(BaseModel):
 
 
 @router.post("/analyze")
+@heavy_operation("Zoom Analysis")
 async def analyze_zoom_points(config: ZoomConfig):
     """Analyze timeline for optimal zoom cut points."""
-    clips = resolve_service.get_timeline_clips("video", 1)
-    if not clips:
+    clip = resolve_service.get_clip_at_playhead("video", 1)
+    if clip is None:
         return {"error": "No video clips found in timeline"}
 
-    file_path = resolve_service.get_clip_file_path(clips[0])
+    file_path = resolve_service.get_clip_file_path(clip)
     if not file_path:
         return {"error": "Could not determine source file path"}
 
     try:
-        await manager.send_progress("zoom", 0.1, "Extracting audio...")
-        audio_path = extract_audio(file_path)
+        await manager.send_progress("zoom", 0.02, "Extracting audio...")
 
-        await manager.send_progress("zoom", 0.3, "Transcribing...")
-        transcript = audio_service.transcribe(audio_path)
+        timeline = resolve_service.get_current_timeline()
+        fps_str = timeline.GetSetting("timelineFrameRate") if timeline else None
+        fps = float(fps_str) if fps_str else 24.0
+        timeline_start_frame = timeline.GetStartFrame() if timeline else 0
+        clip_timeline_offset = (clip.GetStart() - timeline_start_frame) / fps
+        left_offset = clip.GetLeftOffset()
+        clip_duration_frames = clip.GetEnd() - clip.GetStart()
+        source_start = left_offset / fps
+        source_end = (left_offset + clip_duration_frames) / fps
+
+        full_audio = extract_audio(file_path)
+        audio_path = extract_audio_segment(full_audio, source_start, source_end)
+
+        async def progress_fn(pct, msg):
+            scaled = 0.05 + pct * 0.50
+            await manager.send_progress("zoom", scaled, msg)
+
+        transcript = await audio_service.transcribe_with_progress(
+            audio_path, progress_fn=progress_fn,
+        )
 
         await manager.send_progress("zoom", 0.6, "Analyzing audio energy...")
         energy_data = audio_service.get_audio_energy(audio_path)
@@ -54,6 +76,8 @@ async def analyze_zoom_points(config: ZoomConfig):
             zoom_duration_seconds=config.zoom_duration_seconds,
             max_zooms=config.max_zooms
         )
+        for zp in zoom_points:
+            zp["time"] += clip_timeline_offset
 
         await manager.send_progress("zoom", 1.0, f"Found {len(zoom_points)} zoom points")
 
@@ -76,8 +100,16 @@ async def apply_zoom_cuts(request: ZoomApplyRequest):
     if not selected:
         return {"error": "No zoom points selected"}
 
-    # Create backup
+    # Create backup (non-blocking — proceed even if backup fails)
     backup = resolve_service.duplicate_timeline()
+    backup_name = "none"
+    if backup is not None:
+        try:
+            backup_name = backup.GetName()
+        except Exception:
+            backup_name = "backup"
+    else:
+        logger.warning("Could not create backup timeline")
 
     timeline = resolve_service.get_current_timeline()
     if timeline is None:
@@ -112,10 +144,15 @@ async def apply_zoom_cuts(request: ZoomApplyRequest):
 
         await manager.send_complete("zoom_apply", {"applied_count": applied})
 
+        from api.routes.undo import _record
+        _record("Dynamic Zoom", backup_name,
+                f"Applied {applied} zoom effects")
+
         return {
             "success": True,
             "applied_count": applied,
-            "backup_timeline": backup.GetName() if backup else None
+            "backup_timeline": backup_name,
+            "message": f"Applied {applied} zoom effects. Backup: {backup_name}"
         }
     except Exception as e:
         await manager.send_error("zoom_apply", str(e))

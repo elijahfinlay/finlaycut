@@ -15,6 +15,10 @@ from api.routes import (
     settings as settings_route,
     undo,
     transcript_editor,
+    waveform,
+    export,
+    scenes,
+    diarization,
 )
 
 api_router = APIRouter()
@@ -34,3 +38,7 @@ api_router.include_router(thumbnail.router, prefix="/thumbnail", tags=["thumbnai
 api_router.include_router(settings_route.router, prefix="/settings", tags=["settings"])
 api_router.include_router(undo.router, prefix="/undo", tags=["undo"])
 api_router.include_router(transcript_editor.router, prefix="/transcript-editor", tags=["transcript-editor"])
+api_router.include_router(waveform.router, prefix="/waveform", tags=["waveform"])
+api_router.include_router(export.router, prefix="/export", tags=["export"])
+api_router.include_router(scenes.router, prefix="/scenes", tags=["scenes"])
+api_router.include_router(diarization.router, prefix="/diarization", tags=["diarization"])

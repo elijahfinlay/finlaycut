@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
+import { toast } from 'sonner'
 import { Button } from '../common/Button'
-import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
+import { ConfirmApply } from '../common/TimelineGuard'
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
@@ -18,7 +19,7 @@ export function ChapterDetection() {
   const [detecting, setDetecting] = useState(false)
   const [applying, setApplying] = useState(false)
   const [result, setResult] = useState<any>(null)
-  const { progress, message } = useProgress('chapters')
+  const { progress, message, elapsed, eta } = useProgress('chapters')
 
   const handleDetect = async () => {
     setDetecting(true)
@@ -28,11 +29,13 @@ export function ChapterDetection() {
       const data = await apiFetch('/api/chapters/detect', { method: 'POST' })
       if (data.error) {
         setResult({ error: data.error })
+        toast.error(data.error)
       } else {
         setChapters(data.chapters || [])
       }
     } catch (err: any) {
       setResult({ error: err.message })
+      toast.error(err.message)
     } finally {
       setDetecting(false)
     }
@@ -46,20 +49,28 @@ export function ChapterDetection() {
         body: JSON.stringify({ chapters })
       })
       setResult(data)
+      if (data.success) toast.success(data.message || 'Chapter markers added')
+      else if (data.error) toast.error(data.error)
     } catch (err: any) {
       setResult({ error: err.message })
+      toast.error(err.message)
     } finally {
       setApplying(false)
     }
   }
 
   const handleCopyYouTube = async () => {
-    const data = await apiFetch('/api/chapters/export-youtube', {
-      method: 'POST',
-      body: JSON.stringify(chapters.filter((c) => c.selected))
-    })
-    if (data.text) {
-      navigator.clipboard.writeText(data.text)
+    try {
+      const data = await apiFetch('/api/chapters/export-youtube', {
+        method: 'POST',
+        body: JSON.stringify(chapters.filter((c) => c.selected))
+      })
+      if (data.text) {
+        navigator.clipboard.writeText(data.text)
+        toast.success('Copied YouTube chapters to clipboard')
+      }
+    } catch {
+      toast.error('Failed to export chapters')
     }
   }
 
@@ -75,9 +86,19 @@ export function ChapterDetection() {
     )
   }
 
+  const handleJumpToChapter = async (seconds: number) => {
+    try {
+      await apiFetch('/api/resolve/playhead', {
+        method: 'POST',
+        body: JSON.stringify({ seconds })
+      })
+    } catch {
+      // Ignore jump errors
+    }
+  }
+
   return (
     <div className="feature-panel">
-      <TimelineBanner />
       <div>
         <h2 className="feature-title">Chapter Detection</h2>
         <p className="feature-description">
@@ -90,7 +111,7 @@ export function ChapterDetection() {
         Detect Chapters
       </Button>
 
-      {detecting && <ProgressBar progress={progress} message={message} />}
+      {detecting && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
 
       {chapters.length > 0 && (
         <Card>
@@ -103,12 +124,16 @@ export function ChapterDetection() {
               {chapters.map((ch, i) => (
                 <div
                   key={i}
+                  onClick={() => handleJumpToChapter(ch.start_seconds)}
                   className={`flex items-start gap-3 p-3 rounded-lg transition-colors ${
                     ch.selected ? 'bg-blue-500/10' : 'bg-resolve-surfaceLight opacity-50'
                   }`}
                 >
                   <button
-                    onClick={() => toggleChapter(i)}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      toggleChapter(i)
+                    }}
                     className={`mt-1 w-4 h-4 rounded border flex-shrink-0 ${
                       ch.selected ? 'bg-blue-500 border-blue-500' : 'border-resolve-border'
                     }`}
@@ -127,6 +152,7 @@ export function ChapterDetection() {
                       <input
                         type="text"
                         value={ch.title}
+                        onClick={(e) => e.stopPropagation()}
                         onChange={(e) => updateTitle(i, e.target.value)}
                         className="flex-1 bg-transparent border-b border-transparent hover:border-resolve-border focus:border-resolve-accent text-sm text-resolve-text outline-none transition-colors"
                       />

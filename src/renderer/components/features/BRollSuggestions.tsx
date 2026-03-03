@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
+import { toast } from 'sonner'
 import { Button } from '../common/Button'
-import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
+import { ConfirmApply } from '../common/TimelineGuard'
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
@@ -10,7 +11,7 @@ export function BRollSuggestions() {
   const [suggestions, setSuggestions] = useState<any[]>([])
   const [analyzing, setAnalyzing] = useState(false)
   const [result, setResult] = useState<any>(null)
-  const { progress, message } = useProgress('broll')
+  const { progress, message, elapsed, eta } = useProgress('broll')
 
   const handleAnalyze = async () => {
     setAnalyzing(true)
@@ -20,14 +21,17 @@ export function BRollSuggestions() {
       const data = await apiFetch('/api/broll/suggest', { method: 'POST' })
       if (data.error) {
         setResult({ error: data.error })
+        toast.error(data.error)
       } else {
         setSuggestions(data.suggestions || [])
         if (!data.has_pexels_key) {
           setResult({ warning: 'No Pexels API key configured. Add one in Settings for stock footage search.' })
+          toast.warning('No Pexels API key configured. Add one in Settings for stock footage search.')
         }
       }
     } catch (err: any) {
       setResult({ error: err.message })
+      toast.error(err.message)
     } finally {
       setAnalyzing(false)
     }
@@ -47,14 +51,27 @@ export function BRollSuggestions() {
         body: JSON.stringify(selected)
       })
       setResult(data)
+      if (data.success) toast.success(data.message || 'B-Roll inserted')
+      else if (data.error) toast.error(data.error)
     } catch (err: any) {
       setResult({ error: err.message })
+      toast.error(err.message)
+    }
+  }
+
+  const handleJumpToSuggestion = async (seconds: number) => {
+    try {
+      await apiFetch('/api/resolve/playhead', {
+        method: 'POST',
+        body: JSON.stringify({ seconds })
+      })
+    } catch {
+      // Ignore jump errors
     }
   }
 
   return (
     <div className="feature-panel">
-      <TimelineBanner />
       <div>
         <h2 className="feature-title">AI B-Roll Suggestions</h2>
         <p className="feature-description">
@@ -67,7 +84,7 @@ export function BRollSuggestions() {
         Suggest B-Roll
       </Button>
 
-      {analyzing && <ProgressBar progress={progress} message={message} />}
+      {analyzing && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
 
       {suggestions.length > 0 && (
         <div className="space-y-3">
@@ -75,7 +92,10 @@ export function BRollSuggestions() {
             <Card
               key={i}
               className={sug.selected ? 'border-resolve-accent/30' : ''}
-              onClick={() => toggleSuggestion(i)}
+              onClick={() => {
+                toggleSuggestion(i)
+                handleJumpToSuggestion(sug.time_seconds)
+              }}
             >
               <div className="space-y-2">
                 <div className="flex items-center justify-between">

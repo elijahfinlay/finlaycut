@@ -1,35 +1,65 @@
 """Automated captions generation and application endpoints."""
 
+import logging
 from fastapi import APIRouter
 from models.caption import CaptionGenerateRequest, CaptionApplyRequest
 from services.resolve_service import resolve_service
 from services.audio_service import audio_service
 from services.caption_service import caption_service
-from utils.audio_utils import extract_audio
+from utils.audio_utils import extract_audio, extract_audio_segment
+from utils.operation_queue import heavy_operation
 from api.websocket import manager
+from config import settings
+
+logger = logging.getLogger("finlaycut.captions")
 
 router = APIRouter()
 
 
 @router.post("/generate")
+@heavy_operation("Caption Generation")
 async def generate_captions(request: CaptionGenerateRequest):
     """Generate captions from timeline audio."""
-    clips = resolve_service.get_timeline_clips("video", 1)
-    if not clips:
-        clips = resolve_service.get_timeline_clips("audio", 1)
-    if not clips:
+    clip = resolve_service.get_clip_at_playhead("audio", 1)
+    if clip is None:
+        clip = resolve_service.get_clip_at_playhead("video", 1)
+    if clip is None:
         return {"error": "No clips found in timeline"}
 
-    file_path = resolve_service.get_clip_file_path(clips[0])
+    file_path = resolve_service.get_clip_file_path(clip)
     if not file_path:
         return {"error": "Could not determine source file path"}
 
     try:
-        await manager.send_progress("captions", 0.05, "Extracting audio...")
-        audio_path = extract_audio(file_path)
+        await manager.send_progress("captions", 0.02, "Extracting audio...")
 
-        await manager.send_progress("captions", 0.1, "Transcribing...")
-        transcript = audio_service.transcribe(audio_path, language=request.language)
+        timeline = resolve_service.get_current_timeline()
+        fps_str = timeline.GetSetting("timelineFrameRate") if timeline else None
+        fps = float(fps_str) if fps_str else 24.0
+        timeline_start_frame = timeline.GetStartFrame() if timeline else 0
+        clip_timeline_offset = (clip.GetStart() - timeline_start_frame) / fps
+        left_offset = clip.GetLeftOffset()
+        clip_duration_frames = clip.GetEnd() - clip.GetStart()
+        source_start = left_offset / fps
+        source_end = (left_offset + clip_duration_frames) / fps
+
+        full_audio = extract_audio(file_path)
+        audio_path = extract_audio_segment(full_audio, source_start, source_end)
+
+        async def progress_fn(pct, msg):
+            scaled = 0.05 + pct * 0.70
+            await manager.send_progress("captions", scaled, msg)
+
+        transcript = await audio_service.transcribe_with_progress(
+            audio_path, language=request.language, progress_fn=progress_fn,
+        )
+
+        for seg in transcript.get("segments", []):
+            seg["start"] += clip_timeline_offset
+            seg["end"] += clip_timeline_offset
+        for word in transcript.get("words", []):
+            word["start"] += clip_timeline_offset
+            word["end"] += clip_timeline_offset
 
         await manager.send_progress("captions", 0.8, "Generating captions...")
 
@@ -65,8 +95,18 @@ async def apply_captions(request: CaptionApplyRequest):
     if not resolve_service.connected:
         return {"error": "Not connected to DaVinci Resolve"}
 
-    # Create backup
+    await manager.send_progress("captions_apply", 0.1, "Creating backup...")
+
+    # Create backup (non-blocking — proceed even if backup fails)
     backup = resolve_service.duplicate_timeline()
+    backup_name = "none"
+    if backup is not None:
+        try:
+            backup_name = backup.GetName()
+        except Exception:
+            backup_name = "backup"
+    else:
+        logger.warning("Could not create backup timeline")
 
     timeline = resolve_service.get_current_timeline()
     if timeline is None:
@@ -78,21 +118,41 @@ async def apply_captions(request: CaptionApplyRequest):
         if sub_tracks == 0:
             timeline.AddTrack("subtitle")
 
-        await manager.send_progress("captions_apply", 0.5, "Adding captions to timeline...")
+        await manager.send_progress("captions_apply", 0.3, "Saving SRT file...")
 
-        # For now, we'll save the SRT and note it for the user
-        # Full Fusion TextPlus integration would go here for animated captions
+        # Save SRT to disk so the user can import it
+        import os
+        srt_path = os.path.join(str(settings.temp_dir), "captions.srt")
+        if request.srt:
+            with open(srt_path, "w", encoding="utf-8") as f:
+                f.write(request.srt)
+
+        await manager.send_progress("captions_apply", 0.6, "Importing subtitles...")
+
+        # Try to import the SRT into the timeline
+        # Resolve's ImportIntoTimeline can handle SRT files
+        if os.path.exists(srt_path):
+            timeline.ImportIntoTimeline(srt_path, {
+                "autoImportSourceClipsIntoMediaPool": True
+            })
+
+        await manager.send_progress("captions_apply", 1.0, "Done")
 
         await manager.send_complete("captions_apply", {
             "caption_count": len(request.captions),
-            "backup_name": backup.GetName() if backup else "unknown"
+            "backup_name": backup_name
         })
+
+        from api.routes.undo import _record
+        _record("Captions", backup_name,
+                f"Applied {len(request.captions)} captions")
 
         return {
             "success": True,
             "caption_count": len(request.captions),
-            "backup_timeline": backup.GetName() if backup else None,
-            "message": f"Applied {len(request.captions)} captions to timeline"
+            "srt_path": srt_path,
+            "backup_timeline": backup_name,
+            "message": f"Applied {len(request.captions)} captions. SRT saved to {srt_path}. Backup: {backup_name}"
         }
     except Exception as e:
         await manager.send_error("captions_apply", str(e))
@@ -102,13 +162,13 @@ async def apply_captions(request: CaptionApplyRequest):
 @router.get("/export-srt")
 async def export_srt(language: str = None):
     """Export captions as an SRT file."""
-    clips = resolve_service.get_timeline_clips("video", 1)
-    if not clips:
-        clips = resolve_service.get_timeline_clips("audio", 1)
-    if not clips:
+    clip = resolve_service.get_clip_at_playhead("audio", 1)
+    if clip is None:
+        clip = resolve_service.get_clip_at_playhead("video", 1)
+    if clip is None:
         return {"error": "No clips found"}
 
-    file_path = resolve_service.get_clip_file_path(clips[0])
+    file_path = resolve_service.get_clip_file_path(clip)
     if not file_path:
         return {"error": "Could not get source file"}
 

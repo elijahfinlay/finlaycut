@@ -1,43 +1,80 @@
 """Chapter detection endpoints."""
 
+import logging
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from services.resolve_service import resolve_service
 from services.audio_service import audio_service
 from services.ai_service import ai_service
 from services.caption_service import caption_service
-from utils.audio_utils import extract_audio, get_audio_duration
+from utils.audio_utils import extract_audio, extract_audio_segment, get_audio_duration
 from utils.time_utils import seconds_to_frames
+from utils.operation_queue import heavy_operation
 from api.websocket import manager
 
+logger = logging.getLogger("finlaycut.chapters")
 router = APIRouter()
 
 
+class ChapterItem(BaseModel):
+    title: str = "Chapter"
+    start_seconds: float = Field(ge=0)
+    summary: str = ""
+    selected: bool = True
+
+
 class ChapterApplyRequest(BaseModel):
-    chapters: list[dict]
+    chapters: list[ChapterItem]
+
+
+class YouTubeChapterItem(BaseModel):
+    title: str
+    start_seconds: float = Field(ge=0)
+
+
+class YouTubeExportRequest(BaseModel):
+    chapters: list[YouTubeChapterItem]
 
 
 @router.post("/detect")
+@heavy_operation("Chapter Detection")
 async def detect_chapters():
     """Detect natural chapter boundaries using AI."""
-    clips = resolve_service.get_timeline_clips("video", 1)
-    if not clips:
-        clips = resolve_service.get_timeline_clips("audio", 1)
-    if not clips:
+    clip = resolve_service.get_clip_at_playhead("audio", 1)
+    if clip is None:
+        clip = resolve_service.get_clip_at_playhead("video", 1)
+    if clip is None:
         return {"error": "No clips found in timeline"}
 
-    file_path = resolve_service.get_clip_file_path(clips[0])
+    file_path = resolve_service.get_clip_file_path(clip)
     if not file_path:
         return {"error": "Could not determine source file path"}
 
     try:
-        await manager.send_progress("chapters", 0.1, "Extracting audio...")
-        audio_path = extract_audio(file_path)
+        await manager.send_progress("chapters", 0.02, "Extracting audio...")
+
+        timeline = resolve_service.get_current_timeline()
+        fps_str = timeline.GetSetting("timelineFrameRate") if timeline else None
+        fps = float(fps_str) if fps_str else 24.0
+        timeline_start_frame = timeline.GetStartFrame() if timeline else 0
+        clip_timeline_offset = (clip.GetStart() - timeline_start_frame) / fps
+        left_offset = clip.GetLeftOffset()
+        clip_duration_frames = clip.GetEnd() - clip.GetStart()
+        source_start = left_offset / fps
+        source_end = (left_offset + clip_duration_frames) / fps
+
+        full_audio = extract_audio(file_path)
+        audio_path = extract_audio_segment(full_audio, source_start, source_end)
         duration = get_audio_duration(audio_path)
 
-        await manager.send_progress("chapters", 0.2, "Transcribing...")
-        transcript = audio_service.transcribe(audio_path)
+        async def progress_fn(pct, msg):
+            scaled = 0.05 + pct * 0.50
+            await manager.send_progress("chapters", scaled, msg)
+
+        transcript = await audio_service.transcribe_with_progress(
+            audio_path, progress_fn=progress_fn,
+        )
 
         await manager.send_progress("chapters", 0.6, "AI analyzing chapters...")
         raw_chapters = await ai_service.detect_chapters(transcript["text"])
@@ -46,7 +83,7 @@ async def detect_chapters():
         chapters = []
         for ch in raw_chapters:
             pct = ch.get("approximate_position", 0) / 100.0
-            start_seconds = pct * duration
+            start_seconds = clip_timeline_offset + (pct * duration)
             chapters.append({
                 "title": ch.get("title", "Chapter"),
                 "start_seconds": start_seconds,
@@ -72,7 +109,7 @@ async def apply_chapters(request: ChapterApplyRequest):
     if not resolve_service.connected:
         return {"error": "Not connected to DaVinci Resolve"}
 
-    selected = [c for c in request.chapters if c.get("selected", True)]
+    selected = [c for c in request.chapters if c.selected]
     if not selected:
         return {"error": "No chapters selected"}
 
@@ -86,11 +123,11 @@ async def apply_chapters(request: ChapterApplyRequest):
 
     applied = 0
     for ch in selected:
-        frame_id = seconds_to_frames(ch["start_seconds"], fps) + start_frame
+        frame_id = seconds_to_frames(ch.start_seconds, fps) + start_frame
         success = timeline.AddMarker(
             frame_id, "Blue",
-            ch.get("title", "Chapter"),
-            ch.get("summary", ""),
+            ch.title,
+            ch.summary,
             1
         )
         if success:
@@ -104,7 +141,9 @@ async def apply_chapters(request: ChapterApplyRequest):
 
 
 @router.post("/export-youtube")
-async def export_youtube_chapters(chapters: list[dict]):
+async def export_youtube_chapters(request: YouTubeExportRequest):
     """Export chapters as YouTube-formatted timestamps."""
-    text = caption_service.generate_youtube_chapters(chapters)
+    text = caption_service.generate_youtube_chapters(
+        [ch.model_dump() for ch in request.chapters]
+    )
     return {"text": text}

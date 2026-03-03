@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
+import { toast } from 'sonner'
 import { Button } from '../common/Button'
-import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
+
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
@@ -9,7 +10,7 @@ import { useProgress } from '../../hooks/useWebSocket'
 export function AudioEnhancement() {
   const [enhancing, setEnhancing] = useState(false)
   const [result, setResult] = useState<any>(null)
-  const { progress, message } = useProgress('audio_enhance')
+  const { progress, message, elapsed, eta } = useProgress('audio_enhance')
 
   const handleEnhance = async () => {
     setEnhancing(true)
@@ -17,8 +18,11 @@ export function AudioEnhancement() {
     try {
       const data = await apiFetch('/api/audio/enhance', { method: 'POST' })
       setResult(data)
+      if (data.success) toast.success(data.message || 'Audio enhanced successfully')
+      else if (data.error) toast.error(data.error)
     } catch (err: any) {
       setResult({ error: err.message })
+      toast.error(err.message)
     } finally {
       setEnhancing(false)
     }
@@ -26,7 +30,6 @@ export function AudioEnhancement() {
 
   return (
     <div className="feature-panel">
-      <TimelineBanner />
       <div>
         <h2 className="feature-title">Smart Audio Enhancement</h2>
         <p className="feature-description">
@@ -59,7 +62,7 @@ export function AudioEnhancement() {
         Enhance Audio
       </Button>
 
-      {enhancing && <ProgressBar progress={progress} message={message} />}
+      {enhancing && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
 
       {result?.error && (
         <Card className="border-resolve-error/30">

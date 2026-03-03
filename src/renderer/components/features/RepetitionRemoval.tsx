@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
+import { toast } from 'sonner'
 import { Button } from '../common/Button'
-import { TimelineBanner, ConfirmApply } from '../common/TimelineGuard'
+import { ConfirmApply } from '../common/TimelineGuard'
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
@@ -9,8 +10,9 @@ import { useProgress } from '../../hooks/useWebSocket'
 export function RepetitionRemoval() {
   const [groups, setGroups] = useState<any[]>([])
   const [detecting, setDetecting] = useState(false)
+  const [applying, setApplying] = useState(false)
   const [result, setResult] = useState<any>(null)
-  const { progress, message } = useProgress('repetition')
+  const { progress, message, elapsed, eta } = useProgress('repetition')
 
   const handleDetect = async () => {
     setDetecting(true)
@@ -20,11 +22,13 @@ export function RepetitionRemoval() {
       const data = await apiFetch('/api/repetition/detect', { method: 'POST' })
       if (data.error) {
         setResult({ error: data.error })
+        toast.error(data.error)
       } else {
         setGroups(data.groups || [])
       }
     } catch (err: any) {
       setResult({ error: err.message })
+      toast.error(err.message)
     } finally {
       setDetecting(false)
     }
@@ -39,20 +43,36 @@ export function RepetitionRemoval() {
   }
 
   const handleApply = async () => {
+    setApplying(true)
     try {
       const data = await apiFetch('/api/repetition/apply', {
         method: 'POST',
         body: JSON.stringify(groups)
       })
       setResult(data)
+      if (data.success) toast.success(data.message || 'Best takes applied')
+      else if (data.error) toast.error(data.error)
     } catch (err: any) {
       setResult({ error: err.message })
+      toast.error(err.message)
+    } finally {
+      setApplying(false)
+    }
+  }
+
+  const handleJumpToTake = async (seconds: number) => {
+    try {
+      await apiFetch('/api/resolve/playhead', {
+        method: 'POST',
+        body: JSON.stringify({ seconds })
+      })
+    } catch {
+      // Ignore jump errors
     }
   }
 
   return (
     <div className="feature-panel">
-      <TimelineBanner />
       <div>
         <h2 className="feature-title">Take/Repetition Removal</h2>
         <p className="feature-description">
@@ -65,7 +85,7 @@ export function RepetitionRemoval() {
         Detect Repetitions
       </Button>
 
-      {detecting && <ProgressBar progress={progress} message={message} />}
+      {detecting && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
 
       {groups.length > 0 && (
         <div className="space-y-3">
@@ -78,7 +98,10 @@ export function RepetitionRemoval() {
                 {group.takes.map((take: any, ti: number) => (
                   <button
                     key={ti}
-                    onClick={() => selectBest(gi, ti)}
+                    onClick={() => {
+                      selectBest(gi, ti)
+                      handleJumpToTake(take.start)
+                    }}
                     className={`w-full text-left p-3 rounded-lg text-sm transition-colors ${
                       group.best_index === ti
                         ? 'bg-resolve-success/10 border border-resolve-success/30'
@@ -100,7 +123,7 @@ export function RepetitionRemoval() {
             </Card>
           ))}
 
-          <ConfirmApply onConfirm={handleApply} size="lg">
+          <ConfirmApply onConfirm={handleApply} loading={applying} size="lg">
             Keep Best Takes
           </ConfirmApply>
         </div>

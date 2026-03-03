@@ -4,9 +4,12 @@ Handles chapter detection, viral scoring, B-roll suggestions, etc.
 """
 
 import json
+import logging
 from typing import Optional
 import httpx
 from config import settings
+
+logger = logging.getLogger("finlaycut.ai")
 
 
 class AIService:
@@ -49,7 +52,7 @@ class AIService:
         async with httpx.AsyncClient(timeout=120.0) as client:
             messages = [{"role": "user", "content": prompt}]
             payload = {
-                "model": "claude-sonnet-4-5-20250514",
+                "model": settings.claude_model,
                 "max_tokens": 4096,
                 "messages": messages,
             }
@@ -107,7 +110,7 @@ Return ONLY valid JSON, no other text."""
             chapters = json.loads(response)
             return chapters
         except json.JSONDecodeError:
-            print(f"[AIService] Failed to parse chapters response: {response[:200]}")
+            logger.warning("Failed to parse chapters response: %s", response[:200])
             return []
 
     async def score_viral_potential(self, transcript_text: str, duration_seconds: float) -> list[dict]:

@@ -33,4 +33,5 @@ class CaptionGenerateRequest(BaseModel):
 class CaptionApplyRequest(BaseModel):
     captions: list[CaptionEntry]
     style: CaptionStyle = CaptionStyle()
+    srt: Optional[str] = None
     use_fusion: bool = False

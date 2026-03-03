@@ -4,8 +4,46 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { PythonManager } from './python-manager'
 import { registerIpcHandlers } from './ipc-handlers'
 
+// Catch EPIPE errors that occur when stdout/stderr pipes break
+// (e.g., dev server dies, child process pipe closes). Without this,
+// the Electron app crashes with "Error: write EPIPE".
+process.on('uncaughtException', (err) => {
+  if ((err as NodeJS.ErrnoException).code === 'EPIPE') {
+    // Swallow EPIPE — it's harmless, just means a pipe reader closed
+    return
+  }
+  // Log other uncaught exceptions but don't crash
+  try {
+    console.error('[FinlayCut] Uncaught exception:', err)
+  } catch {
+    // Even logging might fail if it's a pipe error
+  }
+})
+
+process.stdout?.on('error', (err) => {
+  if ((err as NodeJS.ErrnoException).code === 'EPIPE') return
+})
+
+process.stderr?.on('error', (err) => {
+  if ((err as NodeJS.ErrnoException).code === 'EPIPE') return
+})
+
 let mainWindow: BrowserWindow | null = null
 let pythonManager: PythonManager | null = null
+
+function blockReloadShortcuts(window: BrowserWindow): void {
+  window.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return
+
+    const isReloadShortcut =
+      (input.code === 'KeyR' && (input.meta || input.control)) ||
+      input.code === 'F5'
+
+    if (isReloadShortcut) {
+      event.preventDefault()
+    }
+  })
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -34,6 +72,8 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
+  blockReloadShortcuts(mainWindow)
+
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
@@ -49,7 +89,17 @@ app.whenReady().then(async () => {
     Menu.buildFromTemplate([
       { role: 'appMenu' },
       { role: 'editMenu' },
-      { role: 'viewMenu' },
+      {
+        label: 'View',
+        submenu: [
+          { role: 'resetZoom' },
+          { role: 'zoomIn' },
+          { role: 'zoomOut' },
+          ...(is.dev ? [{ type: 'separator' as const }, { role: 'toggleDevTools' as const }] : []),
+          { type: 'separator' },
+          { role: 'togglefullscreen' },
+        ],
+      },
       { role: 'windowMenu' },
     ])
   )

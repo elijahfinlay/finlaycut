@@ -24,6 +24,7 @@ export function SettingsPanel() {
       settings.updateSettings({
         aiBackend: data.ai_backend,
         ollamaModel: data.ollama_model,
+        claudeModel: data.claude_model || 'claude-sonnet-4-5-20250514',
         whisperModel: data.whisper_model,
         silenceThresholdDb: data.silence_threshold_db,
         silenceMinDurationMs: data.silence_min_duration_ms,
@@ -56,6 +57,7 @@ export function SettingsPanel() {
         body: JSON.stringify({
           ai_backend: settings.aiBackend,
           claude_api_key: settings.claudeApiKey,
+          claude_model: settings.claudeModel,
           ollama_model: settings.ollamaModel,
           whisper_model: settings.whisperModel,
           silence_threshold_db: settings.silenceThresholdDb,
@@ -76,9 +78,13 @@ export function SettingsPanel() {
   }
 
   const handleClearCache = async () => {
-    await apiFetch('/api/settings/clear-cache', { method: 'POST' })
-    loadCacheSize()
-    setMessage('Cache cleared')
+    try {
+      await apiFetch('/api/settings/clear-cache', { method: 'POST' })
+      loadCacheSize()
+      setMessage('Cache cleared')
+    } catch {
+      setMessage('Failed to clear cache')
+    }
   }
 
   return (
@@ -123,15 +129,29 @@ export function SettingsPanel() {
           )}
 
           {settings.aiBackend === 'claude' && (
-            <div>
-              <label className="text-sm text-resolve-textDim block mb-1">Claude API Key</label>
-              <input
-                type="text"
-                value={settings.claudeApiKey}
-                onChange={(e) => settings.updateSettings({ claudeApiKey: e.target.value })}
-                placeholder="sk-ant-..."
-                className="w-full bg-resolve-bg border border-resolve-border rounded-lg px-3 py-2 text-sm text-resolve-text placeholder:text-resolve-textMuted font-mono"
-              />
+            <div className="space-y-3">
+              <div>
+                <label className="text-sm text-resolve-textDim block mb-1">Claude API Key</label>
+                <input
+                  type="text"
+                  value={settings.claudeApiKey}
+                  onChange={(e) => settings.updateSettings({ claudeApiKey: e.target.value })}
+                  placeholder="sk-ant-..."
+                  className="w-full bg-resolve-bg border border-resolve-border rounded-lg px-3 py-2 text-sm text-resolve-text placeholder:text-resolve-textMuted font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-sm text-resolve-textDim block mb-1">Claude Model</label>
+                <select
+                  value={settings.claudeModel}
+                  onChange={(e) => settings.updateSettings({ claudeModel: e.target.value })}
+                  className="w-full bg-resolve-bg border border-resolve-border rounded-lg px-3 py-2 text-sm text-resolve-text"
+                >
+                  <option value="claude-sonnet-4-5-20250514">Claude Sonnet 4.5</option>
+                  <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5 (Fastest)</option>
+                  <option value="claude-opus-4-6">Claude Opus 4.6 (Most capable)</option>
+                </select>
+              </div>
             </div>
           )}
         </div>

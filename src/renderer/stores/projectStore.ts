@@ -11,8 +11,12 @@ interface ProjectState {
   resolution: string
   duration: number
   activeFeature: string
+  sidebarCollapsed: boolean
+  refreshResolve: (() => Promise<void>) | null
   setStatus: (status: any) => void
   setActiveFeature: (feature: string) => void
+  setRefreshResolve: (fn: () => Promise<void>) => void
+  toggleSidebar: () => void
 }
 
 export const useProjectStore = create<ProjectState>((set) => ({
@@ -26,6 +30,9 @@ export const useProjectStore = create<ProjectState>((set) => ({
   resolution: '',
   duration: 0,
   activeFeature: 'transcript',
+  sidebarCollapsed: false,
+  refreshResolve: null,
+  setRefreshResolve: (fn) => set({ refreshResolve: fn }),
   setStatus: (status) =>
     set({
       connected: status.connected,
@@ -38,5 +45,6 @@ export const useProjectStore = create<ProjectState>((set) => ({
       resolution: status.timeline?.resolution || '',
       duration: status.timeline?.duration || 0
     }),
-  setActiveFeature: (feature) => set({ activeFeature: feature })
+  setActiveFeature: (feature) => set({ activeFeature: feature }),
+  toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
 }))
