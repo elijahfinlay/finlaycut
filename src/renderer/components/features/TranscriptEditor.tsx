@@ -10,6 +10,7 @@ import { WaveformDisplay } from './WaveformDisplay'
 import { apiFetch } from '../../hooks/useApi'
 import { useProgress } from '../../hooks/useWebSocket'
 import { useFeatureDataStore } from '../../stores/featureDataStore'
+import { useOperationStore } from '../../stores/operationStore'
 
 type WordAction = 'keep' | 'cut' | 'mute'
 
@@ -216,6 +217,8 @@ function mergeWordSegments(
   return segments
 }
 
+const TE_OP_NAME = 'transcript_editor'
+
 export function TranscriptEditor() {
   const {
     transcriptWords: storedWords,
@@ -230,10 +233,12 @@ export function TranscriptEditor() {
     setSilenceSettings: storeSilenceSettings,
   } = useFeatureDataStore()
 
+  const teOp = useOperationStore((s) => s.operations[TE_OP_NAME])
+  const transcribing = teOp?.status === 'running'
+
   const [words, setWords] = useState<TranscriptWord[]>(
     storedWords.map((word) => normalizeWord(word))
   )
-  const [transcribing, setTranscribing] = useState(false)
   const [applying, setApplying] = useState(false)
   const [result, setResult] = useState<any>(null)
   const [language, setLanguage] = useState(storedLanguage)
@@ -284,6 +289,25 @@ export function TranscriptEditor() {
   useEffect(() => {
     storeSilenceSettings({ threshold: silenceThreshold, minDuration: silenceMinDuration, padding: silencePadding })
   }, [silenceThreshold, silenceMinDuration, silencePadding, storeSilenceSettings])
+
+  // Pickup: if transcription completed while component was unmounted
+  useEffect(() => {
+    if (teOp?.status === 'complete' && teOp.result) {
+      const data = teOp.result
+      if (data.words) {
+        const normalized = data.words.map((word: any) => normalizeWord(word))
+        pendingAutoDetectRef.current = true
+        setWords(normalized)
+        if (data.transcript_context) {
+          setTranscriptContext(data.transcript_context)
+        }
+      }
+      useOperationStore.getState().clearResult(TE_OP_NAME)
+    }
+    if (teOp?.status === 'error' && teOp.error) {
+      setResult({ error: teOp.error })
+    }
+  }, [teOp?.status, teOp?.result, teOp?.error])
 
   useEffect(() => {
     const handleWindowMouseUp = () => {
@@ -469,7 +493,7 @@ export function TranscriptEditor() {
   }, [])
 
   const handleTranscribe = async (range?: { in_seconds: number; out_seconds: number }) => {
-    setTranscribing(true)
+    useOperationStore.getState().startOperation(TE_OP_NAME)
     setResult(null)
 
     const controller = new AbortController()
@@ -487,18 +511,22 @@ export function TranscriptEditor() {
         signal: controller.signal,
       })
       if (data.error) {
+        useOperationStore.getState().failOperation(TE_OP_NAME, data.error)
         setResult({ error: data.error })
         toast.error(data.error)
       } else {
         const normalized = (data.words || []).map((word: any) => normalizeWord(word))
         const ctx = data.transcript_context || null
 
-        // Write to store FIRST so data persists even if component unmounts
-        // (e.g. user switches to another page during transcription)
-        storeWords(normalized)
-        storeContext(ctx)
+        // Write to Zustand stores directly (works even if unmounted)
+        useFeatureDataStore.getState().setTranscriptWords(normalized)
+        useFeatureDataStore.getState().setTranscriptContext(ctx)
+        useOperationStore.getState().completeOperation(TE_OP_NAME, {
+          words: data.words,
+          transcript_context: ctx,
+        })
 
-        // Then update local state for the UI
+        // Update local state for the UI
         pendingAutoDetectRef.current = true
         setWords(normalized)
         setTranscriptContext(ctx)
@@ -508,7 +536,7 @@ export function TranscriptEditor() {
           .then((wf) => {
             if (wf.amplitudes) {
               const waveformData = { amplitudes: wf.amplitudes, duration: wf.duration }
-              storeWaveform(waveformData)
+              useFeatureDataStore.getState().setTranscriptWaveform(waveformData)
               setWaveform(waveformData)
             }
           })
@@ -519,16 +547,17 @@ export function TranscriptEditor() {
       }
     } catch (err: any) {
       if (err.name === 'AbortError') {
+        useOperationStore.getState().failOperation(TE_OP_NAME, 'Transcription cancelled')
         setResult({ error: 'Transcription cancelled' })
         toast.error('Transcription cancelled')
       } else {
         const is409 = err.status === 409 || (err.message?.includes('already running'))
         if (is409) setOperationBlocked(true)
+        useOperationStore.getState().failOperation(TE_OP_NAME, err.message)
         setResult({ error: err.message })
         toast.error(is409 ? 'A previous operation is stuck. Click "Force Cancel" to clear it.' : err.message)
       }
     } finally {
-      setTranscribing(false)
       abortRef.current = null
     }
   }
@@ -1176,12 +1205,18 @@ export function TranscriptEditor() {
             </select>
           </div>
           {transcribing ? (
-            <Button onClick={handleCancel} variant="ghost" size="lg">
-              Cancel
-            </Button>
+            abortRef.current ? (
+              <Button onClick={handleCancel} variant="ghost" size="lg">
+                Cancel
+              </Button>
+            ) : (
+              <Button disabled size="lg" variant="ghost">
+                Transcription in progress...
+              </Button>
+            )
           ) : (
             <div className="flex items-center gap-2">
-              <Button onClick={() => handleTranscribe()} loading={transcribing} size="lg">
+              <Button onClick={() => handleTranscribe()} size="lg">
                 {words.length > 0 ? 'Re-Transcribe' : 'Transcribe'}
               </Button>
               <Button

@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { toast } from 'sonner'
 import { Button } from '../common/Button'
 import { ConfirmApply } from '../common/TimelineGuard'
@@ -6,23 +6,56 @@ import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
 import { useProgress } from '../../hooks/useWebSocket'
+import { useFeatureDataStore } from '../../stores/featureDataStore'
+import { useOperationStore } from '../../stores/operationStore'
+
+const OP_NAME = 'broll'
 
 export function BRollSuggestions() {
-  const [suggestions, setSuggestions] = useState<any[]>([])
-  const [analyzing, setAnalyzing] = useState(false)
+  const {
+    brollSuggestions: storedSuggestions,
+    setBrollSuggestions: storeSuggestions,
+  } = useFeatureDataStore()
+
+  const op = useOperationStore((s) => s.operations[OP_NAME])
+  const isRunning = op?.status === 'running'
+
+  const [suggestions, setSuggestions] = useState<any[]>(storedSuggestions)
   const [result, setResult] = useState<any>(null)
-  const { progress, message, elapsed, eta } = useProgress('broll')
+  const { progress, message, elapsed, eta } = useProgress(OP_NAME)
+
+  // Persist across tab switches
+  useEffect(() => {
+    storeSuggestions(suggestions)
+  }, [suggestions, storeSuggestions])
+
+  // Pickup: if operation completed while unmounted
+  useEffect(() => {
+    if (op?.status === 'complete' && op.result) {
+      if (op.result.suggestions) setSuggestions(op.result.suggestions)
+      if (!op.result.has_pexels_key) {
+        setResult({ warning: 'No Pexels API key configured. Add one in Settings for stock footage search.' })
+      }
+      useOperationStore.getState().clearResult(OP_NAME)
+    }
+    if (op?.status === 'error' && op.error) {
+      setResult({ error: op.error })
+    }
+  }, [op?.status, op?.result, op?.error])
 
   const handleAnalyze = async () => {
-    setAnalyzing(true)
+    useOperationStore.getState().startOperation(OP_NAME)
     setSuggestions([])
     setResult(null)
     try {
       const data = await apiFetch('/api/broll/suggest', { method: 'POST' })
       if (data.error) {
+        useOperationStore.getState().failOperation(OP_NAME, data.error)
         setResult({ error: data.error })
         toast.error(data.error)
       } else {
+        useFeatureDataStore.getState().setBrollSuggestions(data.suggestions || [])
+        useOperationStore.getState().completeOperation(OP_NAME, data)
         setSuggestions(data.suggestions || [])
         if (!data.has_pexels_key) {
           setResult({ warning: 'No Pexels API key configured. Add one in Settings for stock footage search.' })
@@ -30,10 +63,9 @@ export function BRollSuggestions() {
         }
       }
     } catch (err: any) {
+      useOperationStore.getState().failOperation(OP_NAME, err.message)
       setResult({ error: err.message })
       toast.error(err.message)
-    } finally {
-      setAnalyzing(false)
     }
   }
 
@@ -80,11 +112,17 @@ export function BRollSuggestions() {
         </p>
       </div>
 
-      <Button onClick={handleAnalyze} loading={analyzing} size="lg">
-        Suggest B-Roll
-      </Button>
+      {isRunning ? (
+        <Button disabled size="lg" variant="ghost">
+          Analyzing...
+        </Button>
+      ) : (
+        <Button onClick={handleAnalyze} size="lg">
+          Suggest B-Roll
+        </Button>
+      )}
 
-      {analyzing && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
+      {isRunning && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
 
       {suggestions.length > 0 && (
         <div className="space-y-3">

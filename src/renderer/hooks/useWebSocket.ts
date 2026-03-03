@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { getBaseUrl } from './useApi'
+import { useOperationStore } from '../stores/operationStore'
 
 export interface WSMessage {
   type: 'progress' | 'complete' | 'error' | 'resolve_status'
@@ -35,6 +36,24 @@ function connectWs() {
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data) as WSMessage
+
+        // Write directly to operationStore BEFORE fan-out to listeners.
+        // This ensures progress/complete/error state survives component unmounts.
+        if (msg.operation) {
+          const store = useOperationStore.getState()
+          switch (msg.type) {
+            case 'progress':
+              store.updateProgress(msg.operation, msg.progress || 0, msg.message || '')
+              break
+            case 'complete':
+              store.completeOperation(msg.operation, msg.result)
+              break
+            case 'error':
+              store.failOperation(msg.operation, msg.error || 'Unknown error')
+              break
+          }
+        }
+
         listeners.forEach((fn) => fn(msg))
       } catch {
         // ignore malformed
@@ -84,81 +103,21 @@ export function useWebSocket() {
   return { connected, lastMessage }
 }
 
+/**
+ * Read operation progress from the global operationStore (survives unmount).
+ * Drop-in replacement for the old useState-based useProgress.
+ */
 export function useProgress(operation: string) {
-  const [progress, setProgress] = useState(0)
-  const [message, setMessage] = useState('')
-  const [isComplete, setIsComplete] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [startTime, setStartTime] = useState<number | null>(null)
-  const [elapsed, setElapsed] = useState(0)
-  const [eta, setEta] = useState<number | null>(null)
-  const stalledCountRef = useRef(0)
-  const lastProgressRef = useRef(0)
+  const op = useOperationStore((s) => s.operations[operation])
+  const resetOperation = useOperationStore((s) => s.resetOperation)
 
-  useEffect(() => {
-    const unsub = subscribe((msg) => {
-      if (msg.operation !== operation) return
-
-      switch (msg.type) {
-        case 'progress': {
-          const p = msg.progress || 0
-          const now = Date.now()
-
-          // Detect stalled progress (same value for 3+ consecutive updates)
-          if (Math.abs(p - lastProgressRef.current) < 0.001) {
-            stalledCountRef.current++
-          } else {
-            stalledCountRef.current = 0
-          }
-          lastProgressRef.current = p
-          const isStalled = stalledCountRef.current >= 3
-
-          if (startTime === null || p < 0.01) {
-            setStartTime(now)
-            setElapsed(0)
-            setEta(null)
-            stalledCountRef.current = 0
-          } else {
-            const elapsedMs = now - (startTime ?? now)
-            setElapsed(elapsedMs)
-            if (isStalled) {
-              // Progress isn't advancing — hide ETA, show only elapsed
-              setEta(null)
-            } else if (p > 0.05) {
-              setEta((elapsedMs / p) * (1 - p))
-            }
-          }
-
-          setProgress(p)
-          setMessage(msg.message || '')
-          setIsComplete(false)
-          setError(null)
-          break
-        }
-        case 'complete':
-          setProgress(1)
-          setIsComplete(true)
-          setError(null)
-          setEta(null)
-          break
-        case 'error':
-          setError(msg.error || 'Unknown error')
-          setEta(null)
-          break
-      }
-    })
-    return unsub
-  }, [operation, startTime])
-
-  const reset = useCallback(() => {
-    setProgress(0)
-    setMessage('')
-    setIsComplete(false)
-    setError(null)
-    setStartTime(null)
-    setElapsed(0)
-    setEta(null)
-  }, [])
-
-  return { progress, message, isComplete, error, reset, elapsed, eta }
+  return {
+    progress: op?.progress ?? 0,
+    message: op?.message ?? '',
+    isComplete: op?.status === 'complete',
+    error: op?.error ?? null,
+    elapsed: op?.elapsed ?? 0,
+    eta: op?.eta ?? null,
+    reset: () => resetOperation(operation),
+  }
 }

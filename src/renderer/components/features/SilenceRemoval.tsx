@@ -8,6 +8,7 @@ import { ConfirmApply } from '../common/TimelineGuard'
 import { apiFetch } from '../../hooks/useApi'
 import { useProgress } from '../../hooks/useWebSocket'
 import { useFeatureDataStore } from '../../stores/featureDataStore'
+import { useOperationStore } from '../../stores/operationStore'
 
 interface SilenceSegment {
   start: number
@@ -15,6 +16,8 @@ interface SilenceSegment {
   duration: number
   selected: boolean
 }
+
+const OP_NAME = 'silence'
 
 export function SilenceRemoval() {
   const {
@@ -24,14 +27,16 @@ export function SilenceRemoval() {
     setSilenceSettings: storeSettings,
   } = useFeatureDataStore()
 
+  const op = useOperationStore((s) => s.operations[OP_NAME])
+  const isRunning = op?.status === 'running'
+
   const [threshold, setThreshold] = useState(storedSettings.threshold)
   const [minDuration, setMinDuration] = useState(storedSettings.minDuration)
   const [padding, setPadding] = useState(storedSettings.padding)
   const [segments, setSegments] = useState<SilenceSegment[]>(storedSegments)
-  const [analyzing, setAnalyzing] = useState(false)
   const [applying, setApplying] = useState(false)
   const [result, setResult] = useState<any>(null)
-  const { progress, message, elapsed, eta } = useProgress('silence')
+  const { progress, message, elapsed, eta } = useProgress(OP_NAME)
   const abortRef = useRef<AbortController | null>(null)
 
   // Persist across tab switches
@@ -43,8 +48,21 @@ export function SilenceRemoval() {
     storeSettings({ threshold, minDuration, padding })
   }, [threshold, minDuration, padding, storeSettings])
 
+  // Pickup: if operation completed while we were unmounted, grab the result
+  useEffect(() => {
+    if (op?.status === 'complete' && op.result) {
+      if (op.result.segments) {
+        setSegments(op.result.segments)
+      }
+      useOperationStore.getState().clearResult(OP_NAME)
+    }
+    if (op?.status === 'error' && op.error) {
+      setResult({ error: op.error })
+    }
+  }, [op?.status, op?.result, op?.error])
+
   const handleAnalyze = async () => {
-    setAnalyzing(true)
+    useOperationStore.getState().startOperation(OP_NAME)
     setSegments([])
     setResult(null)
 
@@ -62,22 +80,27 @@ export function SilenceRemoval() {
         signal: controller.signal
       })
       if (data.error) {
+        useOperationStore.getState().failOperation(OP_NAME, data.error)
         setResult({ error: data.error })
         toast.error(data.error)
       } else {
+        // Write to Zustand store directly (works even if unmounted)
+        useFeatureDataStore.getState().setSilenceSegments(data.segments || [])
+        useOperationStore.getState().completeOperation(OP_NAME, data)
         setSegments(data.segments || [])
         setResult(data)
       }
     } catch (err: any) {
       if (err.name === 'AbortError') {
+        useOperationStore.getState().failOperation(OP_NAME, 'Analysis cancelled')
         setResult({ error: 'Analysis cancelled' })
         toast.error('Analysis cancelled')
       } else {
+        useOperationStore.getState().failOperation(OP_NAME, err.message)
         setResult({ error: err.message })
         toast.error(err.message)
       }
     } finally {
-      setAnalyzing(false)
       abortRef.current = null
     }
   }
@@ -175,18 +198,24 @@ export function SilenceRemoval() {
       </Card>
 
       {/* Analyze Button */}
-      {analyzing ? (
-        <Button onClick={handleCancel} variant="ghost" size="lg">
-          Cancel
-        </Button>
+      {isRunning ? (
+        abortRef.current ? (
+          <Button onClick={handleCancel} variant="ghost" size="lg">
+            Cancel
+          </Button>
+        ) : (
+          <Button disabled size="lg" variant="ghost">
+            Analysis in progress...
+          </Button>
+        )
       ) : (
-        <Button onClick={handleAnalyze} loading={analyzing} size="lg">
+        <Button onClick={handleAnalyze} size="lg">
           Analyze
         </Button>
       )}
 
       {/* Progress */}
-      {analyzing && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
+      {isRunning && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
 
       {/* Results */}
       {segments.length > 0 && (

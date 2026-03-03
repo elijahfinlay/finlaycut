@@ -1,11 +1,12 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { toast } from 'sonner'
 import { Button } from '../common/Button'
-
 import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
 import { useProgress } from '../../hooks/useWebSocket'
+import { useFeatureDataStore } from '../../stores/featureDataStore'
+import { useOperationStore } from '../../stores/operationStore'
 
 interface ViralClip {
   start_seconds: number
@@ -17,29 +18,56 @@ interface ViralClip {
   selected: boolean
 }
 
+const OP_NAME = 'viral'
+
 export function ViralClipDetector() {
-  const [clips, setClips] = useState<ViralClip[]>([])
-  const [detecting, setDetecting] = useState(false)
+  const {
+    viralClips: storedClips,
+    setViralClips: storeClips,
+  } = useFeatureDataStore()
+
+  const op = useOperationStore((s) => s.operations[OP_NAME])
+  const isRunning = op?.status === 'running'
+
+  const [clips, setClips] = useState<ViralClip[]>(storedClips)
   const [result, setResult] = useState<any>(null)
-  const { progress, message, elapsed, eta } = useProgress('viral')
+  const { progress, message, elapsed, eta } = useProgress(OP_NAME)
+
+  // Persist across tab switches
+  useEffect(() => {
+    storeClips(clips)
+  }, [clips, storeClips])
+
+  // Pickup: if operation completed while unmounted
+  useEffect(() => {
+    if (op?.status === 'complete' && op.result) {
+      if (op.result.clips) setClips(op.result.clips)
+      useOperationStore.getState().clearResult(OP_NAME)
+    }
+    if (op?.status === 'error' && op.error) {
+      setResult({ error: op.error })
+    }
+  }, [op?.status, op?.result, op?.error])
 
   const handleDetect = async () => {
-    setDetecting(true)
+    useOperationStore.getState().startOperation(OP_NAME)
     setClips([])
     setResult(null)
     try {
       const data = await apiFetch('/api/viral/detect', { method: 'POST' })
       if (data.error) {
+        useOperationStore.getState().failOperation(OP_NAME, data.error)
         setResult({ error: data.error })
         toast.error(data.error)
       } else {
+        useFeatureDataStore.getState().setViralClips(data.clips || [])
+        useOperationStore.getState().completeOperation(OP_NAME, data)
         setClips(data.clips || [])
       }
     } catch (err: any) {
+      useOperationStore.getState().failOperation(OP_NAME, err.message)
       setResult({ error: err.message })
       toast.error(err.message)
-    } finally {
-      setDetecting(false)
     }
   }
 
@@ -85,11 +113,17 @@ export function ViralClipDetector() {
         </p>
       </div>
 
-      <Button onClick={handleDetect} loading={detecting} size="lg">
-        Find Viral Clips
-      </Button>
+      {isRunning ? (
+        <Button disabled size="lg" variant="ghost">
+          Detecting...
+        </Button>
+      ) : (
+        <Button onClick={handleDetect} size="lg">
+          Find Viral Clips
+        </Button>
+      )}
 
-      {detecting && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
+      {isRunning && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
 
       {clips.length > 0 && (
         <div className="space-y-3">

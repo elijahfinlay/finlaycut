@@ -20,69 +20,107 @@ router = APIRouter()
 async def analyze_silence(config: SilenceConfig):
     """
     Analyze the current timeline for silent segments.
-    Extracts audio, runs silence detection, returns segments.
+    Extracts audio from ALL clips, runs silence detection, returns segments.
     """
-    clip = resolve_service.get_clip_at_playhead("audio", 1)
-    if clip is None:
-        clip = resolve_service.get_clip_at_playhead("video", 1)
-    if clip is None:
+    # Get ALL clips — prefer audio track 1, fall back to video track 1
+    clips = resolve_service.get_timeline_clips("audio", 1)
+    if not clips:
+        clips = resolve_service.get_timeline_clips("video", 1)
+    if not clips:
         return {"error": "No clips found in timeline. Make sure your timeline has at least one clip."}
 
-    file_path = resolve_service.get_clip_file_path(clip)
-    if not file_path:
-        return {"error": "Could not determine source file path for the clip."}
+    timeline = resolve_service.get_current_timeline()
+    if timeline is None:
+        return {"error": "No active timeline"}
 
-    await manager.send_progress("silence", 0.1, "Extracting audio...")
+    fps_str = timeline.GetSetting("timelineFrameRate") if timeline else None
+    fps = float(fps_str) if fps_str else 24.0
+    timeline_start_frame = timeline.GetStartFrame() if timeline else 0
+
+    logger.info("Silence analysis: %d clips on timeline", len(clips))
+
+    await manager.send_progress("silence", 0.02, f"Extracting audio from {len(clips)} clip(s)...")
 
     try:
-        # Extract only the timeline-visible portion of audio so timestamps
-        # are relative to timeline start (not source-file start)
-        timeline = resolve_service.get_current_timeline()
-        fps_str = timeline.GetSetting("timelineFrameRate") if timeline else None
-        fps = float(fps_str) if fps_str else 24.0
-        timeline_start_frame = timeline.GetStartFrame() if timeline else 0
-        clip_timeline_offset = (clip.GetStart() - timeline_start_frame) / fps
+        audio_cache: dict[str, str] = {}  # source file -> extracted WAV path
+        all_silences = []
 
-        full_audio = extract_audio(file_path)
+        for clip_idx, clip in enumerate(clips):
+            file_path = resolve_service.get_clip_file_path(clip)
+            if not file_path:
+                logger.warning("Clip %d has no file path, skipping", clip_idx)
+                continue
 
-        # Try to extract just the timeline-visible portion
-        try:
-            left_offset = clip.GetLeftOffset()
-            clip_duration_frames = clip.GetEnd() - clip.GetStart()
-            source_start = left_offset / fps
-            source_end = (left_offset + clip_duration_frames) / fps
-            logger.info("left_offset=%s, clip_frames=%s, source_start=%.2fs, source_end=%.2fs",
-                        left_offset, clip_duration_frames, source_start, source_end)
-            audio_path = extract_audio_segment(full_audio, source_start, source_end)
-        except Exception as e:
-            logger.warning("Segment extraction failed (%s), using full audio", e)
-            audio_path = full_audio
+            clip_start_frame = int(clip.GetStart())
+            clip_end_frame = int(clip.GetEnd())
+            clip_timeline_offset = (clip_start_frame - timeline_start_frame) / fps
 
-        # Detect silences with real progress updates
-        async def progress_cb(pct, msg):
-            scaled = 0.15 + pct * 0.75
-            await manager.send_progress("silence", scaled, msg)
+            # Progress: extraction phase uses 2-15% range
+            pct = 0.02 + (clip_idx / len(clips)) * 0.13
+            await manager.send_progress("silence", pct,
+                f"Extracting audio ({clip_idx + 1}/{len(clips)} clips)...")
 
-        silences = await audio_service.detect_silence_with_progress(
-            audio_path,
-            threshold_db=config.threshold_db,
-            min_duration_ms=config.min_duration_ms,
-            progress_fn=progress_cb,
-        )
+            # Extract full audio from source file (cached per unique file)
+            if file_path not in audio_cache:
+                audio_cache[file_path] = extract_audio(file_path)
+            full_audio = audio_cache[file_path]
 
-        for s in silences:
-            s["start"] += clip_timeline_offset
-            s["end"] += clip_timeline_offset
+            # Extract just the source range visible in the timeline
+            source_range = resolve_service.get_timeline_item_source_range(clip)
+            if source_range:
+                src_start = source_range["source_start_frame"] / fps
+                src_end = source_range["source_end_frame"] / fps
+                try:
+                    audio_path = extract_audio_segment(full_audio, src_start, src_end)
+                except Exception as e:
+                    logger.warning("Segment extraction failed for clip %d (%s), using full audio", clip_idx, e)
+                    audio_path = full_audio
+            else:
+                # Fallback: try left offset extraction
+                try:
+                    left_offset = clip.GetLeftOffset()
+                    clip_duration_frames = clip_end_frame - clip_start_frame
+                    source_start = left_offset / fps
+                    source_end = (left_offset + clip_duration_frames) / fps
+                    audio_path = extract_audio_segment(full_audio, source_start, source_end)
+                except Exception as e:
+                    logger.warning("Segment extraction failed for clip %d (%s), using full audio", clip_idx, e)
+                    audio_path = full_audio
 
-        total_silence = sum(s["duration"] for s in silences)
+            # Detect silences with progress scaled across clips
+            # Detection phase uses 15-90% range, split evenly across clips
+            clip_progress_start = 0.15 + (clip_idx / len(clips)) * 0.75
+            clip_progress_range = 0.75 / len(clips)
 
-        await manager.send_progress("silence", 1.0, f"Found {len(silences)} silent segments")
+            async def progress_cb(pct, msg, _start=clip_progress_start, _range=clip_progress_range):
+                scaled = _start + pct * _range
+                await manager.send_progress("silence", scaled, msg)
+
+            silences = await audio_service.detect_silence_with_progress(
+                audio_path,
+                threshold_db=config.threshold_db,
+                min_duration_ms=config.min_duration_ms,
+                progress_fn=progress_cb,
+            )
+
+            # Offset silence timestamps to timeline time
+            for s in silences:
+                s["start"] += clip_timeline_offset
+                s["end"] += clip_timeline_offset
+
+            all_silences.extend(silences)
+
+        # Sort by start time and merge overlapping silences from adjacent clips
+        all_silences.sort(key=lambda s: s["start"])
+
+        total_silence = sum(s["duration"] for s in all_silences)
+
+        await manager.send_progress("silence", 1.0, f"Found {len(all_silences)} silent segments")
 
         return {
-            "segments": silences,
+            "segments": all_silences,
             "total_silence_seconds": total_silence,
-            "segment_count": len(silences),
-            "audio_path": audio_path
+            "segment_count": len(all_silences),
         }
     except Exception as e:
         await manager.send_error("silence", str(e))

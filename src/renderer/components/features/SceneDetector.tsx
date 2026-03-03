@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { toast } from 'sonner'
 import { Button } from '../common/Button'
 import { Card } from '../common/Card'
@@ -6,6 +6,7 @@ import { Slider } from '../common/Slider'
 import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
 import { useProgress } from '../../hooks/useWebSocket'
+import { useOperationStore } from '../../stores/operationStore'
 
 interface Scene {
   index: number
@@ -14,15 +15,30 @@ interface Scene {
   duration: number
 }
 
+const OP_NAME = 'scenes'
+
 export function SceneDetector() {
+  const op = useOperationStore((s) => s.operations[OP_NAME])
+  const isRunning = op?.status === 'running'
+
   const [threshold, setThreshold] = useState(27)
-  const [detecting, setDetecting] = useState(false)
   const [scenes, setScenes] = useState<Scene[]>([])
   const [result, setResult] = useState<any>(null)
-  const { progress, message, elapsed, eta } = useProgress('scenes')
+  const { progress, message, elapsed, eta } = useProgress(OP_NAME)
+
+  // Pickup: if operation completed while unmounted
+  useEffect(() => {
+    if (op?.status === 'complete' && op.result) {
+      if (op.result.scenes) setScenes(op.result.scenes)
+      useOperationStore.getState().clearResult(OP_NAME)
+    }
+    if (op?.status === 'error' && op.error) {
+      setResult({ error: op.error })
+    }
+  }, [op?.status, op?.result, op?.error])
 
   const handleDetect = async () => {
-    setDetecting(true)
+    useOperationStore.getState().startOperation(OP_NAME)
     setScenes([])
     setResult(null)
     try {
@@ -31,17 +47,18 @@ export function SceneDetector() {
         { method: 'POST' }
       )
       if (data.error) {
+        useOperationStore.getState().failOperation(OP_NAME, data.error)
         setResult({ error: data.error })
         toast.error(data.error)
       } else {
+        useOperationStore.getState().completeOperation(OP_NAME, data)
         setScenes(data.scenes || [])
         toast.success(`Detected ${data.count} scenes`)
       }
     } catch (err: any) {
+      useOperationStore.getState().failOperation(OP_NAME, err.message)
       setResult({ error: err.message })
       toast.error(err.message)
-    } finally {
-      setDetecting(false)
     }
   }
 
@@ -80,11 +97,17 @@ export function SceneDetector() {
         </p>
       </Card>
 
-      <Button onClick={handleDetect} loading={detecting} size="lg">
-        Detect Scenes
-      </Button>
+      {isRunning ? (
+        <Button disabled size="lg" variant="ghost">
+          Detecting...
+        </Button>
+      ) : (
+        <Button onClick={handleDetect} size="lg">
+          Detect Scenes
+        </Button>
+      )}
 
-      {detecting && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
+      {isRunning && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
 
       {scenes.length > 0 && (
         <Card>

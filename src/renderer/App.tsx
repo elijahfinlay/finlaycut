@@ -20,6 +20,7 @@ import { SceneDetector } from './components/features/SceneDetector'
 import { useResolveStatus } from './hooks/useResolveStatus'
 import { useProjectStore } from './stores/projectStore'
 import { useFeatureDataStore } from './stores/featureDataStore'
+import { useOperationStore } from './stores/operationStore'
 import { useSettingsStore } from './stores/settingsStore'
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts'
 import { Onboarding } from './components/features/Onboarding'
@@ -79,6 +80,7 @@ export default function App() {
 
     if (timelineKeyRef.current !== null && timelineKeyRef.current !== nextKey) {
       clearAll()
+      useOperationStore.getState().clearAll()
     }
     timelineKeyRef.current = nextKey
   }, [status.connected, status.project?.name, status.timeline?.name, clearAll])

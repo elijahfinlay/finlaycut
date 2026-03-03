@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { toast } from 'sonner'
 import { Button } from '../common/Button'
 import { ConfirmApply } from '../common/TimelineGuard'
@@ -6,6 +6,8 @@ import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
 import { useProgress } from '../../hooks/useWebSocket'
+import { useFeatureDataStore } from '../../stores/featureDataStore'
+import { useOperationStore } from '../../stores/operationStore'
 
 interface Chapter {
   title: string
@@ -14,30 +16,57 @@ interface Chapter {
   selected: boolean
 }
 
+const OP_NAME = 'chapters'
+
 export function ChapterDetection() {
-  const [chapters, setChapters] = useState<Chapter[]>([])
-  const [detecting, setDetecting] = useState(false)
+  const {
+    chapters: storedChapters,
+    setChapters: storeChapters,
+  } = useFeatureDataStore()
+
+  const op = useOperationStore((s) => s.operations[OP_NAME])
+  const isRunning = op?.status === 'running'
+
+  const [chapters, setChapters] = useState<Chapter[]>(storedChapters)
   const [applying, setApplying] = useState(false)
   const [result, setResult] = useState<any>(null)
-  const { progress, message, elapsed, eta } = useProgress('chapters')
+  const { progress, message, elapsed, eta } = useProgress(OP_NAME)
+
+  // Persist across tab switches
+  useEffect(() => {
+    storeChapters(chapters)
+  }, [chapters, storeChapters])
+
+  // Pickup: if operation completed while unmounted
+  useEffect(() => {
+    if (op?.status === 'complete' && op.result) {
+      if (op.result.chapters) setChapters(op.result.chapters)
+      useOperationStore.getState().clearResult(OP_NAME)
+    }
+    if (op?.status === 'error' && op.error) {
+      setResult({ error: op.error })
+    }
+  }, [op?.status, op?.result, op?.error])
 
   const handleDetect = async () => {
-    setDetecting(true)
+    useOperationStore.getState().startOperation(OP_NAME)
     setChapters([])
     setResult(null)
     try {
       const data = await apiFetch('/api/chapters/detect', { method: 'POST' })
       if (data.error) {
+        useOperationStore.getState().failOperation(OP_NAME, data.error)
         setResult({ error: data.error })
         toast.error(data.error)
       } else {
+        useFeatureDataStore.getState().setChapters(data.chapters || [])
+        useOperationStore.getState().completeOperation(OP_NAME, data)
         setChapters(data.chapters || [])
       }
     } catch (err: any) {
+      useOperationStore.getState().failOperation(OP_NAME, err.message)
       setResult({ error: err.message })
       toast.error(err.message)
-    } finally {
-      setDetecting(false)
     }
   }
 
@@ -107,11 +136,17 @@ export function ChapterDetection() {
         </p>
       </div>
 
-      <Button onClick={handleDetect} loading={detecting} size="lg">
-        Detect Chapters
-      </Button>
+      {isRunning ? (
+        <Button disabled size="lg" variant="ghost">
+          Detecting...
+        </Button>
+      ) : (
+        <Button onClick={handleDetect} size="lg">
+          Detect Chapters
+        </Button>
+      )}
 
-      {detecting && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
+      {isRunning && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
 
       {chapters.length > 0 && (
         <Card>

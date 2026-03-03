@@ -7,6 +7,7 @@ import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
 import { useProgress } from '../../hooks/useWebSocket'
 import { useFeatureDataStore } from '../../stores/featureDataStore'
+import { useOperationStore } from '../../stores/operationStore'
 
 interface FillerDetection {
   word: string
@@ -16,6 +17,8 @@ interface FillerDetection {
   selected: boolean
 }
 
+const OP_NAME = 'filler_words'
+
 export function FillerWordRemoval() {
   const {
     fillerDetections: storedDetections,
@@ -23,11 +26,13 @@ export function FillerWordRemoval() {
     transcriptWords,
   } = useFeatureDataStore()
 
+  const op = useOperationStore((s) => s.operations[OP_NAME])
+  const isRunning = op?.status === 'running'
+
   const [detections, setDetections] = useState<FillerDetection[]>(storedDetections)
-  const [analyzing, setAnalyzing] = useState(false)
   const [applying, setApplying] = useState(false)
   const [result, setResult] = useState<any>(null)
-  const { progress, message, elapsed, eta } = useProgress('filler_words')
+  const { progress, message, elapsed, eta } = useProgress(OP_NAME)
   const abortRef = useRef<AbortController | null>(null)
 
   const hasTranscript = transcriptWords.length > 0
@@ -37,8 +42,21 @@ export function FillerWordRemoval() {
     storeDetections(detections)
   }, [detections, storeDetections])
 
+  // Pickup: if operation completed while unmounted
+  useEffect(() => {
+    if (op?.status === 'complete' && op.result) {
+      if (op.result.detections) {
+        setDetections(op.result.detections)
+      }
+      useOperationStore.getState().clearResult(OP_NAME)
+    }
+    if (op?.status === 'error' && op.error) {
+      setResult({ error: op.error })
+    }
+  }, [op?.status, op?.result, op?.error])
+
   const handleAnalyze = async () => {
-    setAnalyzing(true)
+    useOperationStore.getState().startOperation(OP_NAME)
     setDetections([])
     setResult(null)
 
@@ -46,7 +64,6 @@ export function FillerWordRemoval() {
     abortRef.current = controller
 
     try {
-      // If we have a transcript from the transcript editor, pass it to skip re-transcription
       const body: any = {}
       if (hasTranscript) {
         body.transcript = {
@@ -64,9 +81,12 @@ export function FillerWordRemoval() {
         signal: controller.signal,
       })
       if (data.error) {
+        useOperationStore.getState().failOperation(OP_NAME, data.error)
         setResult({ error: data.error })
         toast.error(data.error)
       } else {
+        useFeatureDataStore.getState().setFillerDetections(data.detections || [])
+        useOperationStore.getState().completeOperation(OP_NAME, data)
         setDetections(data.detections || [])
         if (data.detections?.length === 0) {
           toast.info('No filler words detected')
@@ -74,14 +94,15 @@ export function FillerWordRemoval() {
       }
     } catch (err: any) {
       if (err.name === 'AbortError') {
+        useOperationStore.getState().failOperation(OP_NAME, 'Analysis cancelled')
         setResult({ error: 'Analysis cancelled' })
         toast.error('Analysis cancelled')
       } else {
+        useOperationStore.getState().failOperation(OP_NAME, err.message)
         setResult({ error: err.message })
         toast.error(err.message)
       }
     } finally {
-      setAnalyzing(false)
       abortRef.current = null
     }
   }
@@ -144,13 +165,19 @@ export function FillerWordRemoval() {
       </div>
 
       <Card>
-        {analyzing ? (
-          <Button onClick={handleCancel} variant="ghost" size="lg">
-            Cancel
-          </Button>
+        {isRunning ? (
+          abortRef.current ? (
+            <Button onClick={handleCancel} variant="ghost" size="lg">
+              Cancel
+            </Button>
+          ) : (
+            <Button disabled size="lg" variant="ghost">
+              Analysis in progress...
+            </Button>
+          )
         ) : (
           <div className="space-y-2">
-            <Button onClick={handleAnalyze} loading={analyzing} size="lg">
+            <Button onClick={handleAnalyze} size="lg">
               {detections.length > 0 ? 'Re-Analyze' : 'Analyze'}
             </Button>
             {hasTranscript && (
@@ -168,7 +195,7 @@ export function FillerWordRemoval() {
         )}
       </Card>
 
-      {analyzing && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
+      {isRunning && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
 
       {detections.length > 0 && (
         <Card>

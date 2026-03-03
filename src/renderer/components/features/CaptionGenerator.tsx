@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { toast } from 'sonner'
 import { Button } from '../common/Button'
 import { ConfirmApply } from '../common/TimelineGuard'
@@ -7,21 +7,55 @@ import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
 import { useProgress } from '../../hooks/useWebSocket'
+import { useFeatureDataStore } from '../../stores/featureDataStore'
+import { useOperationStore } from '../../stores/operationStore'
+
+const OP_NAME = 'captions'
 
 export function CaptionGenerator() {
+  const {
+    captions: storedCaptions,
+    srtContent: storedSrt,
+    setCaptions: storeCaptions,
+    setSrtContent: storeSrt,
+  } = useFeatureDataStore()
+
+  const op = useOperationStore((s) => s.operations[OP_NAME])
+  const isRunning = op?.status === 'running'
+
   const [language, setLanguage] = useState('')
   const [fontSize, setFontSize] = useState(48)
   const [position, setPosition] = useState('bottom')
   const [animation, setAnimation] = useState('none')
-  const [captions, setCaptions] = useState<any[]>([])
-  const [srtContent, setSrtContent] = useState('')
-  const [generating, setGenerating] = useState(false)
+  const [captions, setCaptions] = useState<any[]>(storedCaptions)
+  const [srtContent, setSrtContent] = useState(storedSrt)
   const [applying, setApplying] = useState(false)
   const [result, setResult] = useState<any>(null)
-  const { progress, message, elapsed, eta } = useProgress('captions')
+  const { progress, message, elapsed, eta } = useProgress(OP_NAME)
+
+  // Persist captions across tab switches
+  useEffect(() => {
+    storeCaptions(captions)
+  }, [captions, storeCaptions])
+
+  useEffect(() => {
+    storeSrt(srtContent)
+  }, [srtContent, storeSrt])
+
+  // Pickup: if operation completed while unmounted
+  useEffect(() => {
+    if (op?.status === 'complete' && op.result) {
+      if (op.result.captions) setCaptions(op.result.captions)
+      if (op.result.srt) setSrtContent(op.result.srt)
+      useOperationStore.getState().clearResult(OP_NAME)
+    }
+    if (op?.status === 'error' && op.error) {
+      setResult({ error: op.error })
+    }
+  }, [op?.status, op?.result, op?.error])
 
   const handleGenerate = async () => {
-    setGenerating(true)
+    useOperationStore.getState().startOperation(OP_NAME)
     setCaptions([])
     setResult(null)
     try {
@@ -39,17 +73,20 @@ export function CaptionGenerator() {
         })
       })
       if (data.error) {
+        useOperationStore.getState().failOperation(OP_NAME, data.error)
         setResult({ error: data.error })
         toast.error(data.error)
       } else {
+        useFeatureDataStore.getState().setCaptions(data.captions || [])
+        useFeatureDataStore.getState().setSrtContent(data.srt || '')
+        useOperationStore.getState().completeOperation(OP_NAME, data)
         setCaptions(data.captions || [])
         setSrtContent(data.srt || '')
       }
     } catch (err: any) {
+      useOperationStore.getState().failOperation(OP_NAME, err.message)
       setResult({ error: err.message })
       toast.error(err.message)
-    } finally {
-      setGenerating(false)
     }
   }
 
@@ -175,11 +212,17 @@ export function CaptionGenerator() {
         </div>
       </Card>
 
-      <Button onClick={handleGenerate} loading={generating} size="lg">
-        Generate Captions
-      </Button>
+      {isRunning ? (
+        <Button disabled size="lg" variant="ghost">
+          Generating...
+        </Button>
+      ) : (
+        <Button onClick={handleGenerate} size="lg">
+          Generate Captions
+        </Button>
+      )}
 
-      {generating && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
+      {isRunning && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
 
       {/* Caption Preview */}
       {captions.length > 0 && (

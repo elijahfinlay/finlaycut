@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { toast } from 'sonner'
 import { Button } from '../common/Button'
 import { ConfirmApply } from '../common/TimelineGuard'
@@ -6,31 +6,60 @@ import { Card } from '../common/Card'
 import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
 import { useProgress } from '../../hooks/useWebSocket'
+import { useFeatureDataStore } from '../../stores/featureDataStore'
+import { useOperationStore } from '../../stores/operationStore'
+
+const OP_NAME = 'repetition'
 
 export function RepetitionRemoval() {
-  const [groups, setGroups] = useState<any[]>([])
-  const [detecting, setDetecting] = useState(false)
+  const {
+    repetitionGroups: storedGroups,
+    setRepetitionGroups: storeGroups,
+  } = useFeatureDataStore()
+
+  const op = useOperationStore((s) => s.operations[OP_NAME])
+  const isRunning = op?.status === 'running'
+
+  const [groups, setGroups] = useState<any[]>(storedGroups)
   const [applying, setApplying] = useState(false)
   const [result, setResult] = useState<any>(null)
-  const { progress, message, elapsed, eta } = useProgress('repetition')
+  const { progress, message, elapsed, eta } = useProgress(OP_NAME)
+
+  // Persist across tab switches
+  useEffect(() => {
+    storeGroups(groups)
+  }, [groups, storeGroups])
+
+  // Pickup: if operation completed while unmounted
+  useEffect(() => {
+    if (op?.status === 'complete' && op.result) {
+      if (op.result.groups) setGroups(op.result.groups)
+      useOperationStore.getState().clearResult(OP_NAME)
+    }
+    if (op?.status === 'error' && op.error) {
+      setResult({ error: op.error })
+    }
+  }, [op?.status, op?.result, op?.error])
 
   const handleDetect = async () => {
-    setDetecting(true)
+    useOperationStore.getState().startOperation(OP_NAME)
     setGroups([])
     setResult(null)
     try {
       const data = await apiFetch('/api/repetition/detect', { method: 'POST' })
       if (data.error) {
+        useOperationStore.getState().failOperation(OP_NAME, data.error)
         setResult({ error: data.error })
         toast.error(data.error)
       } else {
+        useFeatureDataStore.getState().setRepetitionGroups(data.groups || [])
+        useOperationStore.getState().completeOperation(OP_NAME, data)
         setGroups(data.groups || [])
       }
     } catch (err: any) {
+      useOperationStore.getState().failOperation(OP_NAME, err.message)
       setResult({ error: err.message })
       toast.error(err.message)
-    } finally {
-      setDetecting(false)
     }
   }
 
@@ -81,11 +110,17 @@ export function RepetitionRemoval() {
         </p>
       </div>
 
-      <Button onClick={handleDetect} loading={detecting} size="lg">
-        Detect Repetitions
-      </Button>
+      {isRunning ? (
+        <Button disabled size="lg" variant="ghost">
+          Detecting...
+        </Button>
+      ) : (
+        <Button onClick={handleDetect} size="lg">
+          Detect Repetitions
+        </Button>
+      )}
 
-      {detecting && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
+      {isRunning && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
 
       {groups.length > 0 && (
         <div className="space-y-3">
@@ -129,7 +164,7 @@ export function RepetitionRemoval() {
         </div>
       )}
 
-      {groups.length === 0 && !detecting && result && !result.error && (
+      {groups.length === 0 && !isRunning && result && !result.error && (
         <Card>
           <p className="text-sm text-resolve-textDim">No repetitions detected.</p>
         </Card>
