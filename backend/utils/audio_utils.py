@@ -4,6 +4,7 @@ import logging
 import os
 import subprocess
 import shutil
+import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +23,16 @@ os.environ["PATH"] = _cur
 
 # Cached full path to ffmpeg (resolved once)
 _FFMPEG_PATH: str | None = None
+
+
+def _media_cache_suffix(path: str) -> str:
+    """Build a stable short suffix from the source path and file metadata."""
+    try:
+        stat = os.stat(path)
+        raw = f"{os.path.abspath(path)}:{stat.st_size}:{stat.st_mtime_ns}"
+    except Exception:
+        raw = os.path.abspath(path)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
 
 def get_ffmpeg_path() -> str:
@@ -88,7 +99,8 @@ def extract_audio(
     """
     if output_path is None:
         name = Path(video_path).stem
-        output_path = str(settings.temp_dir / f"{name}_audio.wav")
+        suffix = _media_cache_suffix(video_path)
+        output_path = str(settings.temp_dir / f"{name}_{suffix}_audio.wav")
 
     ffmpeg = get_ffmpeg_path()
     cmd = [
@@ -133,8 +145,10 @@ def extract_audio_segment(
 
     if output_path is None:
         name = Path(audio_path).stem
+        start_ms = int(round(start_seconds * 1000))
+        end_ms = int(round(end_seconds * 1000))
         output_path = str(
-            settings.temp_dir / f"{name}_{start_seconds:.1f}_{end_seconds:.1f}.wav"
+            settings.temp_dir / f"{name}_{start_ms}_{end_ms}.wav"
         )
 
     # Check that start_seconds is within the source audio duration
@@ -203,6 +217,11 @@ def assemble_timeline_audio(
                 clip_audio = clip_audio.set_frame_rate(sample_rate)
             if clip_audio.channels != 1:
                 clip_audio = clip_audio.set_channels(1)
+
+            # Truncate clip audio to its timeline duration to prevent overlay extension
+            clip_duration_ms = int(seg["duration_seconds"] * 1000)
+            if len(clip_audio) > clip_duration_ms:
+                clip_audio = clip_audio[:clip_duration_ms]
 
             position_ms = int(seg["timeline_start_seconds"] * 1000)
             timeline_audio = timeline_audio.overlay(clip_audio, position=position_ms)

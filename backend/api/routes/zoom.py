@@ -43,18 +43,18 @@ async def analyze_zoom_points(config: ZoomConfig):
     try:
         await manager.send_progress("zoom", 0.02, "Extracting audio...")
 
-        timeline = resolve_service.get_current_timeline()
-        fps_str = timeline.GetSetting("timelineFrameRate") if timeline else None
-        fps = float(fps_str) if fps_str else 24.0
-        timeline_start_frame = timeline.GetStartFrame() if timeline else 0
-        clip_timeline_offset = (clip.GetStart() - timeline_start_frame) / fps
-        left_offset = clip.GetLeftOffset()
-        clip_duration_frames = clip.GetEnd() - clip.GetStart()
-        source_start = left_offset / fps
-        source_end = (left_offset + clip_duration_frames) / fps
+        clip_context = resolve_service.get_clip_audio_context(clip)
+        if clip_context is None:
+            return {"error": "Could not determine clip timing context"}
 
         full_audio = extract_audio(file_path)
-        audio_path = extract_audio_segment(full_audio, source_start, source_end)
+        audio_path = full_audio
+        if clip_context.get("source_start_seconds") is not None and clip_context.get("source_end_seconds") is not None:
+            audio_path = extract_audio_segment(
+                full_audio,
+                clip_context["source_start_seconds"],
+                clip_context["source_end_seconds"],
+            )
 
         async def progress_fn(pct, msg):
             scaled = 0.05 + pct * 0.50
@@ -77,7 +77,7 @@ async def analyze_zoom_points(config: ZoomConfig):
             max_zooms=config.max_zooms
         )
         for zp in zoom_points:
-            zp["time"] += clip_timeline_offset
+            zp["time"] += clip_context["clip_timeline_offset"]
 
         await manager.send_progress("zoom", 1.0, f"Found {len(zoom_points)} zoom points")
 

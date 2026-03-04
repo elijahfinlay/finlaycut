@@ -33,18 +33,18 @@ async def generate_captions(request: CaptionGenerateRequest):
     try:
         await manager.send_progress("captions", 0.02, "Extracting audio...")
 
-        timeline = resolve_service.get_current_timeline()
-        fps_str = timeline.GetSetting("timelineFrameRate") if timeline else None
-        fps = float(fps_str) if fps_str else 24.0
-        timeline_start_frame = timeline.GetStartFrame() if timeline else 0
-        clip_timeline_offset = (clip.GetStart() - timeline_start_frame) / fps
-        left_offset = clip.GetLeftOffset()
-        clip_duration_frames = clip.GetEnd() - clip.GetStart()
-        source_start = left_offset / fps
-        source_end = (left_offset + clip_duration_frames) / fps
+        clip_context = resolve_service.get_clip_audio_context(clip)
+        if clip_context is None:
+            return {"error": "Could not determine clip timing context"}
 
         full_audio = extract_audio(file_path)
-        audio_path = extract_audio_segment(full_audio, source_start, source_end)
+        audio_path = full_audio
+        if clip_context.get("source_start_seconds") is not None and clip_context.get("source_end_seconds") is not None:
+            audio_path = extract_audio_segment(
+                full_audio,
+                clip_context["source_start_seconds"],
+                clip_context["source_end_seconds"],
+            )
 
         async def progress_fn(pct, msg):
             scaled = 0.05 + pct * 0.70
@@ -55,11 +55,18 @@ async def generate_captions(request: CaptionGenerateRequest):
         )
 
         for seg in transcript.get("segments", []):
-            seg["start"] += clip_timeline_offset
-            seg["end"] += clip_timeline_offset
+            seg["start"] += clip_context["clip_timeline_offset"]
+            seg["end"] += clip_context["clip_timeline_offset"]
         for word in transcript.get("words", []):
-            word["start"] += clip_timeline_offset
-            word["end"] += clip_timeline_offset
+            local_start = float(word.get("start", 0.0))
+            local_end = float(word.get("end", local_start))
+            word["start"] = local_start + clip_context["clip_timeline_offset"]
+            word["end"] = local_end + clip_context["clip_timeline_offset"]
+            word["start_frame"] = clip_context["clip_start_frame"] + int(round(local_start * clip_context["fps"]))
+            word["end_frame"] = clip_context["clip_start_frame"] + int(round(local_end * clip_context["fps"]))
+            if clip_context.get("source_start_frame") is not None:
+                word["source_start_frame"] = int(clip_context["source_start_frame"]) + int(round(local_start * clip_context["fps"]))
+                word["source_end_frame"] = int(clip_context["source_start_frame"]) + int(round(local_end * clip_context["fps"]))
 
         await manager.send_progress("captions", 0.8, "Generating captions...")
 
@@ -172,7 +179,14 @@ async def export_srt(language: str = None):
     if not file_path:
         return {"error": "Could not get source file"}
 
+    clip_context = resolve_service.get_clip_audio_context(clip)
     audio_path = extract_audio(file_path)
+    if clip_context and clip_context.get("source_start_seconds") is not None and clip_context.get("source_end_seconds") is not None:
+        audio_path = extract_audio_segment(
+            audio_path,
+            clip_context["source_start_seconds"],
+            clip_context["source_end_seconds"],
+        )
     transcript = audio_service.transcribe(audio_path, language=language)
     srt = caption_service.generate_srt(transcript)
 

@@ -15,7 +15,9 @@
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck": "npm run typecheck:web && npm run typecheck:node",
-    "lint": "npm run typecheck"
+    "lint": "npm run typecheck",
+    "eval:quality": "cd backend && MPLCONFIGDIR=/tmp/finlaycut-mpl XDG_CACHE_HOME=/tmp/finlaycut-cache FINLAYCUT_DISABLE_REMOTE_DIARIZATION=1 .venv/bin/python -m evals.runner --fixtures evals/fixtures",
+    "eval:bootstrap": "cd backend && MPLCONFIGDIR=/tmp/finlaycut-mpl XDG_CACHE_HOME=/tmp/finlaycut-cache FINLAYCUT_DISABLE_REMOTE_DIARIZATION=1 FINLAYCUT_WHISPER_MODEL=small .venv/bin/python -m evals.bootstrap"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.1",

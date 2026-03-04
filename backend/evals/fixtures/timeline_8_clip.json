@@ -1,0 +1,110 @@
+{
+  "id": "timeline_8_clip",
+  "enabled": true,
+  "audio_path": "../generated/timeline_8_clip.wav",
+  "fps": 23.976,
+  "language": "en",
+  "transcript_path": "../generated/timeline_8_clip.transcript.json",
+  "notes": "Reviewed baseline fixture from Timeline 8. This first real test case scores only clearly transcribed um/uh fillers. Silence and speaker grading stay disabled until they are manually labeled from audio.",
+  "filler": {
+    "enabled": true,
+    "match_tolerance_ms": 140,
+    "minimum_f1": null,
+    "expected": [
+      {
+        "start": 10.611,
+        "end": 11.473,
+        "label": "filler",
+        "notes": "Um"
+      },
+      {
+        "start": 11.493,
+        "end": 11.553,
+        "label": "filler",
+        "notes": "uh"
+      },
+      {
+        "start": 16.522,
+        "end": 16.743,
+        "label": "filler",
+        "notes": "Uh"
+      },
+      {
+        "start": 22.964,
+        "end": 23.124,
+        "label": "filler",
+        "notes": "Uh"
+      },
+      {
+        "start": 24.486,
+        "end": 24.526,
+        "label": "filler",
+        "notes": "uh"
+      },
+      {
+        "start": 32.555,
+        "end": 32.615,
+        "label": "filler",
+        "notes": "Uh"
+      },
+      {
+        "start": 44.389,
+        "end": 44.449,
+        "label": "filler",
+        "notes": "uh"
+      },
+      {
+        "start": 64.373,
+        "end": 64.413,
+        "label": "filler",
+        "notes": "um"
+      },
+      {
+        "start": 66.775,
+        "end": 66.815,
+        "label": "filler",
+        "notes": "uh"
+      },
+      {
+        "start": 69.137,
+        "end": 69.177,
+        "label": "filler",
+        "notes": "uh"
+      },
+      {
+        "start": 75.584,
+        "end": 75.624,
+        "label": "filler",
+        "notes": "uh"
+      },
+      {
+        "start": 79.828,
+        "end": 80.388,
+        "label": "filler",
+        "notes": "uh"
+      },
+      {
+        "start": 86.174,
+        "end": 86.214,
+        "label": "filler",
+        "notes": "uh"
+      }
+    ]
+  },
+  "silence": {
+    "enabled": false,
+    "threshold_db": -40,
+    "min_duration_ms": 300,
+    "min_duration_frames": 14,
+    "match_tolerance_ms": 160,
+    "minimum_f1": null,
+    "expected": []
+  },
+  "speakers": {
+    "enabled": false,
+    "num_speakers": 2,
+    "minimum_accuracy": null,
+    "expected_segments": [],
+    "expected_word_speakers": []
+  }
+}

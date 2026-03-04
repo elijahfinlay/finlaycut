@@ -1,13 +1,17 @@
 """Transcript-based video editing: see the text, delete words, cut the video."""
 
 import logging
+from datetime import datetime, timezone
 from fastapi import APIRouter
 from pydantic import BaseModel
-from typing import Optional
+from typing import Literal, Optional
+from uuid import uuid4
 from services.resolve_service import resolve_service
 from services.audio_service import audio_service
+from services.diarization_service import diarization_service
 from utils.audio_utils import extract_audio, extract_audio_segment, assemble_timeline_audio
 from utils.operation_queue import heavy_operation
+from utils.speaker_analysis import build_speaker_summaries, compute_speaker_loudness
 from api.websocket import manager
 
 logger = logging.getLogger("finlaycut.transcript_editor")
@@ -19,6 +23,7 @@ class TranscribeRequest(BaseModel):
     language: Optional[str] = None
     in_seconds: Optional[float] = None
     out_seconds: Optional[float] = None
+    detect_speakers: bool = True
 
 
 class KeptSegment(BaseModel):
@@ -28,6 +33,8 @@ class KeptSegment(BaseModel):
     end_frame: Optional[int] = None
     source_start_frame: Optional[int] = None
     source_end_frame: Optional[int] = None
+    file_path: Optional[str] = None
+    clip_item_id: Optional[str] = None
 
 
 class TranscriptContext(BaseModel):
@@ -39,11 +46,46 @@ class TranscriptContext(BaseModel):
     source_end_frame: Optional[int] = None
 
 
+class TranscriptSession(BaseModel):
+    session_id: str
+    timeline_name: Optional[str] = None
+    timeline_signature: str
+    last_synced_at: str
+    sync_state: Literal["fresh", "stale", "reconcilable", "requires_retranscribe"]
+    stale_reason: Optional[Literal["external_timeline_change", "signature_mismatch", "ambiguous_sync", "content_changed"]] = None
+    origin: Literal["transcribe", "transcript_apply", "reconcile"]
+
+
+class TranscriptWordPayload(BaseModel):
+    word: str
+    start: float
+    end: float
+    start_frame: Optional[int] = None
+    end_frame: Optional[int] = None
+    source_start_frame: Optional[int] = None
+    source_end_frame: Optional[int] = None
+    file_path: Optional[str] = None
+    clip_item_id: Optional[str] = None
+    kind: Optional[str] = None
+    probability: Optional[float] = None
+    action: Optional[str] = None
+    selected: Optional[bool] = None
+    speaker: Optional[str] = None
+    speaker_index: Optional[int] = None
+
+
 class ApplyRequest(BaseModel):
     cut_segments: Optional[list[KeptSegment]] = None
     kept_segments: Optional[list[KeptSegment]] = None
     muted_segments: Optional[list[KeptSegment]] = None
     transcript_context: Optional[TranscriptContext] = None
+    transcript_session: Optional[TranscriptSession] = None
+
+
+class ReconcileRequest(BaseModel):
+    words: list[TranscriptWordPayload]
+    transcript_context: Optional[TranscriptContext] = None
+    transcript_session: Optional[TranscriptSession] = None
 
 
 class JumpWordRequest(BaseModel):
@@ -103,6 +145,23 @@ def _frame_range_to_segment(start_frame: int, end_frame: int, timeline_start_fra
         "end_frame": int(end_frame),
         "start": (int(start_frame) - int(timeline_start_frame)) / float(fps),
         "end": (int(end_frame) - int(timeline_start_frame)) / float(fps),
+    }
+
+
+def _build_transcript_session(
+    signature_info: dict,
+    origin: Literal["transcribe", "transcript_apply", "reconcile"],
+    sync_state: Literal["fresh", "stale", "reconcilable", "requires_retranscribe"] = "fresh",
+    stale_reason: Optional[Literal["external_timeline_change", "signature_mismatch", "ambiguous_sync", "content_changed"]] = None,
+) -> dict:
+    return {
+        "session_id": str(uuid4()),
+        "timeline_name": signature_info.get("timeline_name"),
+        "timeline_signature": str(signature_info.get("timeline_signature") or ""),
+        "last_synced_at": datetime.now(timezone.utc).isoformat(),
+        "sync_state": sync_state,
+        "stale_reason": stale_reason,
+        "origin": origin,
     }
 
 
@@ -192,7 +251,14 @@ async def transcribe_timeline(request: TranscribeRequest):
             clip_segments.append({
                 "audio_path": clip_audio,
                 "timeline_start_seconds": clip_timeline_start_sec,
+                "timeline_end_seconds": clip_timeline_end_sec,
                 "duration_seconds": clip_duration_sec,
+                "timeline_start_frame": clip_start_frame,
+                "timeline_end_frame": clip_end_frame,
+                "source_start_frame": int(source_range["source_start_frame"]) if source_range else None,
+                "source_end_frame": int(source_range["source_end_frame"]) if source_range else None,
+                "file_path": file_path,
+                "clip_item_id": resolve_service.get_timeline_item_unique_id(clip),
             })
 
         if not clip_segments:
@@ -232,6 +298,25 @@ async def transcribe_timeline(request: TranscribeRequest):
 
         # Map word timestamps to timeline positions
         words = transcript.get("words", [])
+        clip_segments_sorted = sorted(clip_segments, key=lambda seg: seg["timeline_start_seconds"])
+
+        def _match_clip_segment(word_start_sec: float, word_end_sec: float) -> dict | None:
+            midpoint = (word_start_sec + word_end_sec) / 2.0
+            for seg in clip_segments_sorted:
+                if seg["timeline_start_seconds"] - (1.0 / fps) <= midpoint < seg["timeline_end_seconds"] + (1.0 / fps):
+                    return seg
+
+            best_match = None
+            best_overlap = 0.0
+            for seg in clip_segments_sorted:
+                overlap_start = max(word_start_sec, seg["timeline_start_seconds"])
+                overlap_end = min(word_end_sec, seg["timeline_end_seconds"])
+                overlap = max(0.0, overlap_end - overlap_start)
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_match = seg
+            return best_match
+
         for w in words:
             word_start_sec = float(w["start"]) + audio_offset
             word_end_sec = float(w["end"]) + audio_offset
@@ -240,28 +325,108 @@ async def transcribe_timeline(request: TranscribeRequest):
             w["start"] = word_start_sec
             w["end"] = word_end_sec
 
+            matched_segment = _match_clip_segment(word_start_sec, word_end_sec)
+            if matched_segment is not None:
+                seg_start_frame = int(matched_segment["timeline_start_frame"])
+                seg_end_frame = int(matched_segment["timeline_end_frame"])
+                word_start_frame = max(seg_start_frame, min(seg_end_frame, int(w["start_frame"])))
+                word_end_frame = max(seg_start_frame, min(seg_end_frame, int(w["end_frame"])))
+                source_start_frame = matched_segment.get("source_start_frame")
+                if source_start_frame is not None:
+                    w["source_start_frame"] = int(source_start_frame) + max(0, word_start_frame - seg_start_frame)
+                    w["source_end_frame"] = int(source_start_frame) + max(0, word_end_frame - seg_start_frame)
+                if matched_segment.get("file_path"):
+                    w["file_path"] = matched_segment.get("file_path")
+                if matched_segment.get("clip_item_id"):
+                    w["clip_item_id"] = matched_segment.get("clip_item_id")
+
         # If range mode, filter out any words that leaked outside the range
         if is_range:
             words = [w for w in words if w["start"] >= range_in - 0.1 and w["end"] <= range_out + 0.1]
 
-        transcript_context = {
-            "clip_item_id": None,
-            "file_path": None,
-            "clip_start_frame": timeline_start_frame,
-            "clip_end_frame": timeline_end_frame,
-            "source_start_frame": None,
-            "source_end_frame": None,
-        }
+        speaker_segments: list[dict] = []
+        speaker_summaries: list[dict] = []
+        speaker_method: str | None = None
+        speaker_fallback_reason: str | None = None
+        speaker_detection_error: str | None = None
+
+        if request.detect_speakers and words:
+            try:
+                await manager.send_progress("transcript_editor", 0.96, "Detecting speakers...")
+
+                async def speaker_progress_fn(pct: float, msg: str):
+                    scaled = 0.96 + min(max(float(pct), 0.0), 1.0) * 0.03
+                    await manager.send_progress("transcript_editor", scaled, msg)
+
+                raw_segments, speaker_method, speaker_fallback_reason = await diarization_service.diarize_with_progress(
+                    audio_path,
+                    progress_fn=speaker_progress_fn,
+                )
+                loudness = compute_speaker_loudness(audio_path, raw_segments)
+
+                for segment in raw_segments:
+                    start = round(float(segment.get("start", 0.0)) + float(audio_offset), 3)
+                    end = round(float(segment.get("end", 0.0)) + float(audio_offset), 3)
+                    if end <= start:
+                        continue
+                    speaker_segments.append({
+                        **segment,
+                        "start": start,
+                        "end": end,
+                        "duration": round(end - start, 3),
+                    })
+
+                words = diarization_service.assign_speakers_to_words(
+                    [dict(word) for word in words],
+                    speaker_segments,
+                )
+                speaker_summaries = build_speaker_summaries(speaker_segments, words, loudness)
+            except Exception as e:
+                speaker_detection_error = str(e)
+                logger.warning("Automatic speaker detection failed during transcription: %s", e)
+
+        if len(clip_segments_sorted) == 1:
+            only_seg = clip_segments_sorted[0]
+            transcript_context = {
+                "clip_item_id": only_seg.get("clip_item_id"),
+                "file_path": only_seg.get("file_path"),
+                "clip_start_frame": only_seg.get("timeline_start_frame"),
+                "clip_end_frame": only_seg.get("timeline_end_frame"),
+                "source_start_frame": only_seg.get("source_start_frame"),
+                "source_end_frame": only_seg.get("source_end_frame"),
+            }
+        else:
+            transcript_context = {
+                "clip_item_id": None,
+                "file_path": None,
+                "clip_start_frame": timeline_start_frame,
+                "clip_end_frame": timeline_end_frame,
+                "source_start_frame": None,
+                "source_end_frame": None,
+            }
+        transcript_signature = resolve_service.get_timeline_signature()
+        transcript_session = (
+            _build_transcript_session(transcript_signature, "transcribe")
+            if transcript_signature is not None
+            else None
+        )
 
         await manager.send_progress("transcript_editor", 1.0, "Transcription complete")
 
         return {
             "words": words,
             "transcript_context": transcript_context,
+            "transcript_session": transcript_session,
             "text": " ".join(w["word"] for w in words),
             "language": transcript.get("language"),
             "word_count": len(words),
             "range": {"in_seconds": range_in, "out_seconds": range_out} if is_range else None,
+            "segments": speaker_segments,
+            "speakers": speaker_summaries,
+            "speaker_count": len(speaker_summaries),
+            "speaker_method": speaker_method,
+            "speaker_fallback_reason": speaker_fallback_reason,
+            "speaker_detection_error": speaker_detection_error,
         }
     except Exception as e:
         await manager.send_error("transcript_editor", str(e))
@@ -291,6 +456,76 @@ async def jump_to_transcript_word(request: JumpWordRequest):
     }
 
 
+@router.post("/reconcile")
+async def reconcile_transcript(request: ReconcileRequest):
+    """Try to re-anchor an existing transcript onto the current timeline without re-transcribing."""
+    if not resolve_service.connected:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    if not request.words:
+        return {"error": "No transcript words provided"}
+
+    if request.transcript_session is None:
+        return {
+            "success": False,
+            "code": "REQUIRES_RETRANSCRIBE",
+            "reason": "signature_mismatch",
+            "message": "This transcript is missing freshness metadata. Re-transcribe before syncing it.",
+        }
+
+    signature_info = resolve_service.get_timeline_signature()
+    if signature_info is None:
+        return {"error": "No active timeline"}
+
+    spoken_words = [
+        word.model_dump()
+        for word in request.words
+        if word.kind not in {"silence", "audio_hesitation"}
+        and word.word not in {"[silence]", "[filler]"}
+    ]
+    if not spoken_words:
+        return {
+            "success": False,
+            "code": "REQUIRES_RETRANSCRIBE",
+            "reason": "content_changed",
+            "message": "No spoken transcript words are available to sync.",
+        }
+
+    result = resolve_service.resolve_transcript_words_on_current_timeline(
+        spoken_words,
+        request.transcript_context.model_dump() if request.transcript_context else None,
+    )
+    if not result.get("success"):
+        reason = result.get("reason") or "content_changed"
+        stale_reason = "ambiguous_sync" if reason == "ambiguous_sync" else "content_changed"
+        return {
+            "success": False,
+            "code": "REQUIRES_RETRANSCRIBE",
+            "reason": reason,
+            "message": result.get("error", "The current timeline can no longer be safely matched to this transcript."),
+            "transcript_session": _build_transcript_session(
+                signature_info,
+                "reconcile",
+                sync_state="requires_retranscribe",
+                stale_reason=stale_reason,
+            ),
+        }
+
+    return {
+        "success": True,
+        "words": result.get("words", []),
+        "transcript_context": result.get("transcript_context"),
+        "transcript_session": _build_transcript_session(signature_info, "reconcile"),
+        "analysis_invalidated": ["fillers", "silences", "speakers"],
+        "sync_result": {
+            "mode": "reconciled",
+            "coverage_ratio": result.get("coverage_ratio", 0.0),
+            "confidence": result.get("confidence", 0.0),
+        },
+        "message": "Transcript synced to the current timeline. Re-run fillers, silences, and speakers if needed.",
+    }
+
+
 @router.post("/apply")
 @heavy_operation("Transcript Edit")
 async def apply_transcript_edits(request: ApplyRequest):
@@ -300,6 +535,27 @@ async def apply_transcript_edits(request: ApplyRequest):
 
     if not request.cut_segments and not request.kept_segments and not request.muted_segments:
         return {"error": "No transcript edits selected"}
+
+    if request.transcript_session is None or not request.transcript_session.timeline_signature:
+        return {
+            "error": "This transcript is missing freshness metadata. Re-transcribe before applying transcript edits.",
+            "code": "TRANSCRIPT_SESSION_REQUIRED",
+            "requires_retranscribe": True,
+            "stale_reason": "signature_mismatch",
+        }
+
+    current_signature = resolve_service.get_timeline_signature()
+    if current_signature is None:
+        return {"error": "No active timeline"}
+
+    if request.transcript_session.timeline_signature != current_signature["timeline_signature"]:
+        return {
+            "error": "Transcript is out of date with the current timeline.",
+            "code": "TRANSCRIPT_STALE",
+            "requires_retranscribe": True,
+            "current_timeline_signature": current_signature["timeline_signature"],
+            "stale_reason": "external_timeline_change",
+        }
 
     await manager.send_progress("transcript_editor", 0.1, "Creating backup...")
     backup = resolve_service.duplicate_timeline()
@@ -476,18 +732,6 @@ async def apply_transcript_edits(request: ApplyRequest):
             return {"error": result.get("error", "Failed to apply edits to timeline")}
 
         logger.info("Rebuild: %d kept segments, %d muted segments applied", len(kept_segments_for_service), len(merged_muted))
-
-        # Auto-close gaps between clips so user doesn't have to Cmd+G manually
-        await manager.send_progress("transcript_editor", 0.85, "Closing gaps...")
-        import time as _time
-        _time.sleep(0.3)  # Let Resolve settle after rebuild
-        resolve_service.select_all_and_close_gaps()
-        _time.sleep(0.3)
-
-        # Auto-link video+audio pairs so clips stay linked
-        await manager.send_progress("transcript_editor", 0.92, "Linking clips...")
-        resolve_service.link_all_clips()
-        _time.sleep(0.2)
     else:
         result = {"success": True, "timeline_name": timeline.GetName()}
 
@@ -532,6 +776,7 @@ async def apply_transcript_edits(request: ApplyRequest):
     if muted_seconds > 0:
         message += f", muted {len(merged_muted)} sections ({muted_seconds:.1f}s silenced)"
     message += f". Backup: {backup_name}"
+    next_signature = resolve_service.get_timeline_signature()
 
     return {
         "success": True,
@@ -542,5 +787,6 @@ async def apply_transcript_edits(request: ApplyRequest):
         "backup_timeline": backup_name,
         "timeline_name": result.get("timeline_name"),
         "updated_transcript_context": updated_context,
+        "transcript_session": _build_transcript_session(next_signature, "transcript_apply") if next_signature is not None else None,
         "message": message
     }

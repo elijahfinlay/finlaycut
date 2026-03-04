@@ -15,6 +15,11 @@ interface TranscriptWord {
   end_frame?: number
   source_start_frame?: number
   source_end_frame?: number
+  file_path?: string
+  clip_item_id?: string
+  kind?: string
+  speaker?: string
+  speaker_index?: number
   probability: number
   action?: 'keep' | 'cut' | 'mute'
   selected?: boolean
@@ -30,10 +35,26 @@ interface TranscriptContext {
   source_end_frame?: number
 }
 
+interface TranscriptSession {
+  session_id: string
+  timeline_name: string | null
+  timeline_signature: string
+  last_synced_at: string
+  sync_state: 'fresh' | 'stale' | 'reconcilable' | 'requires_retranscribe'
+  stale_reason?: 'external_timeline_change' | 'signature_mismatch' | 'ambiguous_sync' | 'content_changed'
+  origin: 'transcribe' | 'transcript_apply' | 'reconcile'
+}
+
 interface FillerDetection {
   word: string
   start: number
   end: number
+  start_frame?: number
+  end_frame?: number
+  source_start_frame?: number
+  source_end_frame?: number
+  kind?: string
+  boundary_source?: string
   context: string
   selected: boolean
 }
@@ -42,6 +63,10 @@ interface SilenceSegment {
   start: number
   end: number
   duration: number
+  start_frame?: number
+  end_frame?: number
+  kind?: string
+  boundary_source?: string
   selected: boolean
 }
 
@@ -50,9 +75,13 @@ interface FeatureDataState {
   transcriptWords: TranscriptWord[]
   transcriptLanguage: string
   transcriptContext: TranscriptContext | null
+  transcriptSession: TranscriptSession | null
+  transcriptSpeakers: any[]
   setTranscriptWords: (words: TranscriptWord[]) => void
   setTranscriptLanguage: (lang: string) => void
   setTranscriptContext: (context: TranscriptContext | null) => void
+  setTranscriptSession: (session: TranscriptSession | null) => void
+  setTranscriptSpeakers: (speakers: any[]) => void
 
   // Transcript Editor — waveform (survives page switches)
   transcriptWaveform: { amplitudes: number[]; duration: number } | null
@@ -64,9 +93,9 @@ interface FeatureDataState {
 
   // Silence Removal
   silenceSegments: SilenceSegment[]
-  silenceSettings: { threshold: number; minDuration: number; padding: number }
+  silenceSettings: { threshold: number; minDuration: number; minFrames: number; padding: number }
   setSilenceSegments: (segments: SilenceSegment[]) => void
-  setSilenceSettings: (settings: { threshold: number; minDuration: number; padding: number }) => void
+  setSilenceSettings: (settings: { threshold: number; minDuration: number; minFrames: number; padding: number }) => void
 
   // Caption Generator
   captions: any[]
@@ -109,9 +138,13 @@ export const useFeatureDataStore = create<FeatureDataState>()(
       transcriptWords: [],
       transcriptLanguage: '',
       transcriptContext: null,
+      transcriptSession: null,
+      transcriptSpeakers: [],
       setTranscriptWords: (words) => set({ transcriptWords: words }),
       setTranscriptLanguage: (lang) => set({ transcriptLanguage: lang }),
       setTranscriptContext: (context) => set({ transcriptContext: context }),
+      setTranscriptSession: (session) => set({ transcriptSession: session }),
+      setTranscriptSpeakers: (speakers) => set({ transcriptSpeakers: speakers }),
 
       // Waveform
       transcriptWaveform: null,
@@ -123,7 +156,7 @@ export const useFeatureDataStore = create<FeatureDataState>()(
 
       // Silence
       silenceSegments: [],
-      silenceSettings: { threshold: -40, minDuration: 300, padding: 100 },
+      silenceSettings: { threshold: -40, minDuration: 300, minFrames: 14, padding: 100 },
       setSilenceSegments: (segments) => set({ silenceSegments: segments }),
       setSilenceSettings: (settings) => set({ silenceSettings: settings }),
 
@@ -162,10 +195,12 @@ export const useFeatureDataStore = create<FeatureDataState>()(
         transcriptWords: [],
         transcriptLanguage: '',
         transcriptContext: null,
+        transcriptSession: null,
+        transcriptSpeakers: [],
         transcriptWaveform: null,
         fillerDetections: [],
         silenceSegments: [],
-        silenceSettings: { threshold: -40, minDuration: 300, padding: 100 },
+        silenceSettings: { threshold: -40, minDuration: 300, minFrames: 14, padding: 100 },
         captions: [],
         srtContent: '',
         chapters: [],
@@ -182,6 +217,8 @@ export const useFeatureDataStore = create<FeatureDataState>()(
         transcriptWords: state.transcriptWords,
         transcriptLanguage: state.transcriptLanguage,
         transcriptContext: state.transcriptContext,
+        transcriptSession: state.transcriptSession,
+        transcriptSpeakers: state.transcriptSpeakers,
         transcriptWaveform: state.transcriptWaveform,
         fillerDetections: state.fillerDetections,
         silenceSegments: state.silenceSegments,

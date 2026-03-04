@@ -10,6 +10,7 @@ interface SettingsState {
   pexelsApiKey: string
   silenceThresholdDb: number
   silenceMinDurationMs: number
+  silenceMinDurationFrames: number
   silencePaddingMs: number
   fillerWords: string[]
   cacheLimitGb: number
@@ -29,6 +30,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   pexelsApiKey: '',
   silenceThresholdDb: -40,
   silenceMinDurationMs: 300,
+  silenceMinDurationFrames: 14,
   silencePaddingMs: 100,
   fillerWords: ['um', 'uh', 'uh-huh', 'uhh', 'uhm', 'umm', 'hmm', 'mmhmm', 'mhm', 'mm', 'huh', 'er', 'erm', 'ah', 'ahh'],
   cacheLimitGb: 2.0,
@@ -47,6 +49,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         whisperModel: data.whisper_model,
         silenceThresholdDb: data.silence_threshold_db,
         silenceMinDurationMs: data.silence_min_duration_ms,
+        silenceMinDurationFrames: Math.max(14, data.silence_min_duration_frames ?? 14),
         silencePaddingMs: data.silence_padding_ms,
         fillerWords: data.filler_words,
         cacheLimitGb: data.cache_limit_gb,

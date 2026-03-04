@@ -32,18 +32,18 @@ async def suggest_broll():
     try:
         await manager.send_progress("broll", 0.02, "Extracting audio...")
 
-        timeline = resolve_service.get_current_timeline()
-        fps_str = timeline.GetSetting("timelineFrameRate") if timeline else None
-        fps = float(fps_str) if fps_str else 24.0
-        timeline_start_frame = timeline.GetStartFrame() if timeline else 0
-        clip_timeline_offset = (clip.GetStart() - timeline_start_frame) / fps
-        left_offset = clip.GetLeftOffset()
-        clip_duration_frames = clip.GetEnd() - clip.GetStart()
-        source_start = left_offset / fps
-        source_end = (left_offset + clip_duration_frames) / fps
+        clip_context = resolve_service.get_clip_audio_context(clip)
+        if clip_context is None:
+            return {"error": "Could not determine clip timing context"}
 
         full_audio = extract_audio(file_path)
-        audio_path = extract_audio_segment(full_audio, source_start, source_end)
+        audio_path = full_audio
+        if clip_context.get("source_start_seconds") is not None and clip_context.get("source_end_seconds") is not None:
+            audio_path = extract_audio_segment(
+                full_audio,
+                clip_context["source_start_seconds"],
+                clip_context["source_end_seconds"],
+            )
         duration = get_audio_duration(audio_path)
 
         async def progress_fn(pct, msg):
@@ -61,7 +61,7 @@ async def suggest_broll():
         suggestions = []
         for i, sug in enumerate(raw_suggestions):
             pct = sug.get("time_pct", 0) / 100.0
-            time_seconds = clip_timeline_offset + (pct * duration)
+            time_seconds = clip_context["clip_timeline_offset"] + (pct * duration)
 
             # Search Pexels for stock footage
             search_results = []

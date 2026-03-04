@@ -14,6 +14,60 @@ logger = logging.getLogger("finlaycut.repetition")
 router = APIRouter()
 
 
+def _merge_frame_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    valid = sorted((int(start), int(end)) for start, end in ranges if int(end) > int(start))
+    if not valid:
+        return []
+
+    merged = [valid[0]]
+    for start, end in valid[1:]:
+        prev_start, prev_end = merged[-1]
+        if start <= prev_end:
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _subtract_frame_ranges(
+    base_start: int,
+    base_end: int,
+    cuts: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    if base_end <= base_start:
+        return []
+
+    if not cuts:
+        return [(base_start, base_end)]
+
+    remaining: list[tuple[int, int]] = []
+    cursor = int(base_start)
+    for cut_start, cut_end in cuts:
+        if cut_end <= cursor:
+            continue
+        if cut_start >= base_end:
+            break
+        if cut_start > cursor:
+            remaining.append((cursor, min(cut_start, base_end)))
+        cursor = max(cursor, cut_end)
+        if cursor >= base_end:
+            break
+
+    if cursor < base_end:
+        remaining.append((cursor, base_end))
+
+    return remaining
+
+
+def _frame_range_to_segment(start_frame: int, end_frame: int, timeline_start_frame: int, fps: float) -> dict:
+    return {
+        "start_frame": int(start_frame),
+        "end_frame": int(end_frame),
+        "start": (int(start_frame) - int(timeline_start_frame)) / float(fps),
+        "end": (int(end_frame) - int(timeline_start_frame)) / float(fps),
+    }
+
+
 @router.post("/detect")
 @heavy_operation("Repetition Detection")
 async def detect_repetitions():
@@ -31,18 +85,18 @@ async def detect_repetitions():
     try:
         await manager.send_progress("repetition", 0.02, "Extracting audio...")
 
-        timeline = resolve_service.get_current_timeline()
-        fps_str = timeline.GetSetting("timelineFrameRate") if timeline else None
-        fps = float(fps_str) if fps_str else 24.0
-        timeline_start_frame = timeline.GetStartFrame() if timeline else 0
-        clip_timeline_offset = (clip.GetStart() - timeline_start_frame) / fps
-        left_offset = clip.GetLeftOffset()
-        clip_duration_frames = clip.GetEnd() - clip.GetStart()
-        source_start = left_offset / fps
-        source_end = (left_offset + clip_duration_frames) / fps
+        clip_context = resolve_service.get_clip_audio_context(clip)
+        if clip_context is None:
+            return {"error": "Could not determine clip timing context"}
 
         full_audio = extract_audio(file_path)
-        audio_path = extract_audio_segment(full_audio, source_start, source_end)
+        audio_path = full_audio
+        if clip_context.get("source_start_seconds") is not None and clip_context.get("source_end_seconds") is not None:
+            audio_path = extract_audio_segment(
+                full_audio,
+                clip_context["source_start_seconds"],
+                clip_context["source_end_seconds"],
+            )
 
         async def progress_fn(pct, msg):
             scaled = 0.05 + pct * 0.50
@@ -59,9 +113,9 @@ async def detect_repetitions():
             takes = group.get("takes", [])
             for take in takes:
                 if "start" in take:
-                    take["start"] += clip_timeline_offset
+                    take["start"] += clip_context["clip_timeline_offset"]
                 if "end" in take:
-                    take["end"] += clip_timeline_offset
+                    take["end"] += clip_context["clip_timeline_offset"]
 
         await manager.send_progress("repetition", 1.0, f"Found {len(groups)} repeated sections")
 
@@ -119,22 +173,24 @@ async def apply_repetition_removal(groups: list[dict]):
     if not segments_to_remove:
         return {"success": True, "message": "Nothing to remove"}
 
-    # Sort removals and build kept segments
-    segments_to_remove.sort(key=lambda s: s["start"])
-    kept_segments = []
-    cursor = 0.0
-    for rem in segments_to_remove:
-        if rem["start"] > cursor:
-            kept_segments.append({"start": cursor, "end": rem["start"]})
-        cursor = max(cursor, rem["end"])
-    if cursor < total_duration:
-        kept_segments.append({"start": cursor, "end": total_duration})
+    cut_frame_ranges = _merge_frame_ranges([
+        (
+            tl_start + int(round(float(rem["start"]) * fps)),
+            tl_start + int(round(float(rem["end"]) * fps)),
+        )
+        for rem in segments_to_remove
+    ])
+    kept_frame_ranges = _subtract_frame_ranges(tl_start, tl_end, cut_frame_ranges)
+    kept_segments = [
+        _frame_range_to_segment(start_frame, end_frame, tl_start, fps)
+        for start_frame, end_frame in kept_frame_ranges
+    ]
 
     result = resolve_service.rebuild_timeline_keeping(kept_segments, in_place=True)
     if not result["success"]:
         return {"error": result.get("error", "Failed to apply edits to current timeline")}
 
-    total_removed = sum(r["end"] - r["start"] for r in segments_to_remove)
+    total_removed = sum((end_frame - start_frame) / fps for start_frame, end_frame in cut_frame_ranges)
 
     from api.routes.undo import _record
     _record("Repetition Removal", backup_name,
@@ -142,9 +198,9 @@ async def apply_repetition_removal(groups: list[dict]):
 
     return {
         "success": True,
-        "removed_takes": len(segments_to_remove),
+        "removed_takes": len(cut_frame_ranges),
         "total_removed_seconds": round(total_removed, 1),
         "backup_timeline": backup_name,
         "timeline_name": result.get("timeline_name"),
-        "message": f"Removed {len(segments_to_remove)} duplicate takes ({total_removed:.1f}s) on the current timeline. Backup: {backup_name}"
+        "message": f"Removed {len(cut_frame_ranges)} duplicate take sections ({total_removed:.1f}s) on the current timeline. Backup: {backup_name}"
     }

@@ -2,233 +2,66 @@ import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { toast } from 'sonner'
 import { Button } from '../common/Button'
 import { Card } from '../common/Card'
-import { Slider } from '../common/Slider'
 import { useProjectStore } from '../../stores/projectStore'
 import { ProgressBar } from '../layout/ProgressBar'
-import { ConfirmApply } from '../common/TimelineGuard'
-import { WaveformDisplay } from './WaveformDisplay'
 import { apiFetch } from '../../hooks/useApi'
-import { useProgress } from '../../hooks/useWebSocket'
+import { useProgress, subscribe, sendWsMessage } from '../../hooks/useWebSocket'
 import { useFeatureDataStore } from '../../stores/featureDataStore'
 import { useOperationStore } from '../../stores/operationStore'
 
-type WordAction = 'keep' | 'cut' | 'mute'
-
-interface TranscriptWord {
-  word: string
-  start: number
-  end: number
-  start_frame?: number
-  end_frame?: number
-  source_start_frame?: number
-  source_end_frame?: number
-  probability: number
-  action: WordAction
-  selected: boolean
-  deleted?: boolean
-}
-
-interface Segment {
-  start: number
-  end: number
-  start_frame?: number
-  end_frame?: number
-  source_start_frame?: number
-  source_end_frame?: number
-}
-
-interface TranscriptContext {
-  clip_item_id?: string
-  file_path?: string
-  clip_start_frame?: number
-  clip_end_frame?: number
-  source_start_frame?: number
-  source_end_frame?: number
-}
-
-const MERGE_GAP_SECONDS = 0.05
-const SAFETY_PADDING_SECONDS = 0.08 // 80ms — protects dialogue from being clipped at cut boundaries
-
-/** Unambiguous filler words only. No common words like "so", "like", "right", "a". */
-const FILLER_WORDS = new Set([
-  'um', 'uh', 'uh-huh', 'uhh', 'uhm', 'umm',
-  'hmm', 'mmhmm', 'mhm', 'mm',
-  'huh', 'er', 'erm', 'ah', 'ahh',
-])
-
-/**
- * LCS-based diff: finds which original words were removed in the edited text.
- * Returns an array of booleans — true if the word at that index was kept.
- */
-function lcsWordDiff(originalWords: string[], editedWords: string[]): boolean[] {
-  const m = originalWords.length
-  const n = editedWords.length
-
-  // Build LCS table
-  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0))
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      if (normalizeText(originalWords[i - 1]) === normalizeText(editedWords[j - 1])) {
-        dp[i][j] = dp[i - 1][j - 1] + 1
-      } else {
-        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1])
-      }
-    }
-  }
-
-  // Backtrack to find which original words are in the LCS
-  const kept = new Array(m).fill(false)
-  let i = m
-  let j = n
-  while (i > 0 && j > 0) {
-    if (normalizeText(originalWords[i - 1]) === normalizeText(editedWords[j - 1])) {
-      kept[i - 1] = true
-      i--
-      j--
-    } else if (dp[i - 1][j] >= dp[i][j - 1]) {
-      i--
-    } else {
-      j--
-    }
-  }
-
-  return kept
-}
-
-function normalizeText(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'") // smart single quotes → straight
-    .replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, '"') // smart double quotes → straight
-    .replace(/[\u2013\u2014\u2015]/g, '-') // en/em dash → hyphen
-    .replace(/\u2026/g, '...') // ellipsis character → dots
-    .replace(/[.,!?;:'"()\-\[\]{}]/g, '') // remove punctuation
-    .trim()
-}
-
-function normalizeWord(raw: any): TranscriptWord {
-  const rawAction = typeof raw?.action === 'string' ? raw.action : null
-  const action: WordAction =
-    rawAction === 'cut' || rawAction === 'mute' || rawAction === 'keep'
-      ? rawAction
-      : raw?.deleted
-        ? 'cut'
-        : 'keep'
-
-  return {
-    word: String(raw?.word || ''),
-    start: Number(raw?.start || 0),
-    end: Number(raw?.end || 0),
-    start_frame:
-      typeof raw?.start_frame === 'number' ? raw.start_frame : undefined,
-    end_frame: typeof raw?.end_frame === 'number' ? raw.end_frame : undefined,
-    source_start_frame:
-      typeof raw?.source_start_frame === 'number' ? raw.source_start_frame : undefined,
-    source_end_frame:
-      typeof raw?.source_end_frame === 'number' ? raw.source_end_frame : undefined,
-    probability: Number(raw?.probability || 0),
-    action,
-    selected: Boolean(raw?.selected),
-  }
-}
-
-function mergeWordSegments(
-  words: TranscriptWord[],
-  include: (word: TranscriptWord) => boolean
-): Segment[] {
-  const segments: Segment[] = []
-  let currentStart: number | null = null
-  let currentEnd: number | null = null
-  let currentStartFrame: number | undefined
-  let currentEndFrame: number | undefined
-  let currentSourceStartFrame: number | undefined
-  let currentSourceEndFrame: number | undefined
-
-  for (const word of words) {
-    if (include(word)) {
-      if (currentStart === null || currentEnd === null) {
-        currentStart = word.start
-        currentEnd = word.end
-        currentStartFrame =
-          typeof word.start_frame === 'number' ? word.start_frame : undefined
-        currentEndFrame =
-          typeof word.end_frame === 'number' ? word.end_frame : undefined
-        currentSourceStartFrame =
-          typeof word.source_start_frame === 'number' ? word.source_start_frame : undefined
-        currentSourceEndFrame =
-          typeof word.source_end_frame === 'number' ? word.source_end_frame : undefined
-      } else if (word.start - currentEnd <= MERGE_GAP_SECONDS) {
-        currentEnd = Math.max(currentEnd, word.end)
-        if (typeof word.end_frame === 'number') {
-          currentEndFrame = word.end_frame
-        }
-        if (typeof word.source_end_frame === 'number') {
-          currentSourceEndFrame = word.source_end_frame
-        }
-      } else {
-        segments.push({
-          start: currentStart,
-          end: currentEnd,
-          start_frame: currentStartFrame,
-          end_frame: currentEndFrame,
-          source_start_frame: currentSourceStartFrame,
-          source_end_frame: currentSourceEndFrame,
-        })
-        currentStart = word.start
-        currentEnd = word.end
-        currentStartFrame =
-          typeof word.start_frame === 'number' ? word.start_frame : undefined
-        currentEndFrame =
-          typeof word.end_frame === 'number' ? word.end_frame : undefined
-        currentSourceStartFrame =
-          typeof word.source_start_frame === 'number' ? word.source_start_frame : undefined
-        currentSourceEndFrame =
-          typeof word.source_end_frame === 'number' ? word.source_end_frame : undefined
-      }
-    } else if (currentStart !== null && currentEnd !== null) {
-      segments.push({
-        start: currentStart,
-        end: currentEnd,
-        start_frame: currentStartFrame,
-        end_frame: currentEndFrame,
-        source_start_frame: currentSourceStartFrame,
-        source_end_frame: currentSourceEndFrame,
-      })
-      currentStart = null
-      currentEnd = null
-      currentStartFrame = undefined
-      currentEndFrame = undefined
-      currentSourceStartFrame = undefined
-      currentSourceEndFrame = undefined
-    }
-  }
-
-  if (currentStart !== null && currentEnd !== null) {
-    segments.push({
-      start: currentStart,
-      end: currentEnd,
-      start_frame: currentStartFrame,
-      end_frame: currentEndFrame,
-      source_start_frame: currentSourceStartFrame,
-      source_end_frame: currentSourceEndFrame,
-    })
-  }
-
-  return segments
-}
-
-const TE_OP_NAME = 'transcript_editor'
+import {
+  type WordAction,
+  type TranscriptWord,
+  type Segment,
+  type TranscriptContext,
+  type TranscriptSession,
+  type SpeakerSummary,
+  type WaveformViewport,
+  type CutBoundary,
+  TE_OP_NAME,
+  FILLER_WORDS,
+  FILLER_PATTERNS,
+  MIN_FILLER_FRAMES,
+  SAFETY_PADDING_SECONDS,
+  lcsWordDiff,
+  normalizeSpokenToken,
+  isSilenceMarker,
+  isAudioFillerMarker,
+  isAnalysisMarker,
+  sortTranscriptWords,
+  shrinkSegmentForSafety,
+  adjustFillerSegmentForRemoval,
+  isLikelyFillerWord,
+  wordOverlapsSegment,
+  findActiveWordIndex,
+  retimeWordsAfterCuts,
+  normalizeWord,
+  isTranscriptSessionStale,
+  mergeWordSegments,
+  formatTimestamp,
+} from './transcript/types'
+import { TranscriptToolbar } from './transcript/TranscriptToolbar'
+import { TranscriptWords } from './transcript/TranscriptWords'
+import { TranscriptFooter } from './transcript/TranscriptFooter'
+import { SilenceSettingsPanel } from './transcript/SilenceSettingsPanel'
+import { SpeakerPanel } from './transcript/SpeakerPanel'
+import { ScriptCutPanel } from './transcript/ScriptCutPanel'
+import { WaveformCard } from './transcript/WaveformCard'
 
 export function TranscriptEditor() {
   const {
     transcriptWords: storedWords,
     transcriptLanguage: storedLanguage,
     transcriptContext: storedContext,
+    transcriptSession: storedSession,
+    transcriptSpeakers: storedSpeakers,
     transcriptWaveform: storedWaveform,
     silenceSettings: storedSilenceSettings,
     setTranscriptWords: storeWords,
     setTranscriptLanguage: storeLanguage,
     setTranscriptContext: storeContext,
+    setTranscriptSession: storeSession,
+    setTranscriptSpeakers: storeSpeakers,
     setTranscriptWaveform: storeWaveform,
     setSilenceSettings: storeSilenceSettings,
   } = useFeatureDataStore()
@@ -243,29 +76,265 @@ export function TranscriptEditor() {
   const [result, setResult] = useState<any>(null)
   const [language, setLanguage] = useState(storedLanguage)
   const [transcriptContext, setTranscriptContext] = useState<TranscriptContext | null>(storedContext)
+  const [transcriptSession, setTranscriptSession] = useState<TranscriptSession | null>(storedSession)
+  const [speakerSummaries, setSpeakerSummaries] = useState<SpeakerSummary[]>(storedSpeakers || [])
   const [selectionAnchor, setSelectionAnchor] = useState<number | null>(null)
   const [dragStart, setDragStart] = useState<number | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [waveform, setWaveform] = useState<{ amplitudes: number[]; duration: number } | null>(storedWaveform)
   const [activeWordIndex, setActiveWordIndex] = useState<number | null>(null)
+  const [playheadSeconds, setPlayheadSeconds] = useState<number>(0)
   const [isFollowing, setIsFollowing] = useState(true)
   const [showTimestamps, setShowTimestamps] = useState(false)
   const [isPlaying, setIsPlaying] = useState(false)
   const [findingFillers, setFindingFillers] = useState(false)
   const [findingSilences, setFindingSilences] = useState(false)
   const [showSilenceSettings, setShowSilenceSettings] = useState(false)
+  const [showScriptPanel, setShowScriptPanel] = useState(false)
+  const [showSpeakers, setShowSpeakers] = useState(false)
   const [silenceThreshold, setSilenceThreshold] = useState(storedSilenceSettings.threshold) // dB
   const [silenceMinDuration, setSilenceMinDuration] = useState(storedSilenceSettings.minDuration) // ms
+  const [silenceMinFrames, setSilenceMinFrames] = useState(Math.max(storedSilenceSettings.minFrames ?? 14, 14))
   const [silencePadding, setSilencePadding] = useState(Math.max(storedSilenceSettings.padding, 150)) // ms — floor of 150 to protect dialogue
   const [autoDetectFillers, setAutoDetectFillers] = useState(true)
+  const [detectedFillerRanges, setDetectedFillerRanges] = useState<Segment[]>([])
+  const [analyzingSpeakers, setAnalyzingSpeakers] = useState(false)
+  const [isReconciling, setIsReconciling] = useState(false)
+  const [scriptText, setScriptText] = useState('')
+  const [heldClickAction, setHeldClickAction] = useState<'cut' | 'mute' | 'keep' | null>(null)
   const { framerate } = useProjectStore()
   const [operationBlocked, setOperationBlocked] = useState(false)
   const { progress, message, elapsed, eta } = useProgress('transcript_editor')
+  const {
+    progress: speakerProgress,
+    message: speakerMessage,
+    elapsed: speakerElapsed,
+    eta: speakerEta,
+  } = useProgress('diarization')
   const abortRef = useRef<AbortController | null>(null)
   const activeWordRef = useRef<HTMLSpanElement | null>(null)
   const transcriptContainerRef = useRef<HTMLDivElement | null>(null)
   const lastClickTimeRef = useRef<number>(0)
   const pendingAutoDetectRef = useRef(false)
+  const heldClickActionRef = useRef<'cut' | 'mute' | 'keep' | null>(null)
+  const staleNotifiedRef = useRef(false)
+  const staleCountRef = useRef(0)
+  const isPlayingRef = useRef(false)
+  const lastToggleTimeRef = useRef(0)
+  const playheadSampleRef = useRef<{ seconds: number; sampledAt: number }>({
+    seconds: 0,
+    sampledAt: performance.now(),
+  })
+  const transcriptIsStale = isTranscriptSessionStale(transcriptSession)
+  const transcriptMutationBlocked = transcriptIsStale || applying || isReconciling
+  // Waveform viewport: null = auto (follow selection), 'full' = force full timeline, object = manual pan/zoom
+  const [waveformViewport, setWaveformViewport] = useState<WaveformViewport | 'full' | null>(null)
+
+  // Auto-zoom viewport: when words are selected, zoom the waveform to that region
+  const autoZoomViewport = useMemo<WaveformViewport | null>(() => {
+    const selected = words.filter((w) => w.selected)
+    if (selected.length === 0 || !waveform) return null
+
+    const selStart = Math.min(...selected.map((w) => w.start))
+    const selEnd = Math.max(...selected.map((w) => w.end))
+    const selDuration = selEnd - selStart
+
+    // Add context padding: ~2s or 1.5x selection duration, whichever is larger
+    const padding = Math.max(2, selDuration * 1.5)
+    const startTime = Math.max(0, selStart - padding)
+    const endTime = Math.min(waveform.duration, selEnd + padding)
+
+    return { startTime, endTime }
+  }, [words, waveform])
+
+  // Freeze viewport during boundary drags so word time changes don't shift the view
+  const frozenViewportRef = useRef<WaveformViewport | null | undefined>(undefined)
+
+  // Resolve effective viewport: manual > 'full' override > auto-zoom
+  const computedViewport =
+    waveformViewport === 'full'
+      ? null
+      : typeof waveformViewport === 'object' && waveformViewport !== null
+        ? waveformViewport
+        : autoZoomViewport
+
+  const effectiveViewport = frozenViewportRef.current !== undefined
+    ? frozenViewportRef.current
+    : computedViewport
+
+  // Reset manual viewport whenever the selection changes so auto-zoom kicks in
+  const selectionSig = useMemo(() => {
+    let sig = ''
+    for (let i = 0; i < words.length; i++) {
+      if (words[i].selected) sig += `${i},`
+    }
+    return sig
+  }, [words])
+
+  const prevSelSigRef = useRef(selectionSig)
+  useEffect(() => {
+    if (selectionSig !== prevSelSigRef.current) {
+      const hadSelection = prevSelSigRef.current !== ''
+      const hasSelection = selectionSig !== ''
+      prevSelSigRef.current = selectionSig
+
+      // Only auto-zoom when gaining a NEW selection, not when selection changes/clears
+      // If user manually zoomed to 'full', don't override unless they make a fresh selection
+      if (hasSelection && !hadSelection) {
+        setWaveformViewport(null) // triggers auto-zoom
+      } else if (!hasSelection) {
+        setWaveformViewport(null) // no selection → full timeline (autoZoomViewport returns null)
+      }
+      // If selection changed but user was in 'full' or manual zoom, keep their viewport
+    }
+  }, [selectionSig])
+
+  // Cut boundaries: all cut↔keep transitions with exact edge times for frame-accurate trimming
+  const cutBoundaries = useMemo<CutBoundary[]>(() => {
+    if (words.length === 0) return []
+
+    const boundaries: CutBoundary[] = []
+    for (let i = 0; i < words.length - 1; i++) {
+      const curr = words[i]
+      const next = words[i + 1]
+
+      // Transition from non-cut to cut → boundary is at the start of the cut word
+      if (curr.action !== 'cut' && next.action === 'cut') {
+        boundaries.push({
+          time: next.start,
+          wordIndexBefore: i,
+          wordIndexAfter: i + 1,
+          side: 'start',
+        })
+      }
+      // Transition from cut to non-cut → boundary is at the end of the cut word
+      if (curr.action === 'cut' && next.action !== 'cut') {
+        boundaries.push({
+          time: curr.end,
+          wordIndexBefore: i,
+          wordIndexAfter: i + 1,
+          side: 'end',
+        })
+      }
+    }
+
+    // Edge: first word is cut
+    if (words[0].action === 'cut') {
+      boundaries.push({ time: words[0].start, wordIndexBefore: -1, wordIndexAfter: 0, side: 'start' })
+    }
+    // Edge: last word is cut
+    const last = words.length - 1
+    if (words[last].action === 'cut') {
+      boundaries.push({ time: words[last].end, wordIndexBefore: last, wordIndexAfter: last + 1, side: 'end' })
+    }
+
+    return boundaries
+  }, [words])
+
+  // Snapshot of words at drag start — used to compute frame-accurate boundary trims
+  const dragSnapshotRef = useRef<TranscriptWord[] | null>(null)
+  const fpsValue = parseFloat(framerate) || 24
+
+  // Snap a time value to the nearest frame boundary
+  const snapToFrame = useCallback(
+    (t: number) => Math.round(t * fpsValue) / fpsValue,
+    [fpsValue],
+  )
+
+  const handleBoundaryDragStart = useCallback(() => {
+    dragSnapshotRef.current = words.map((w) => ({ ...w }))
+    frozenViewportRef.current = effectiveViewport
+  }, [words, effectiveViewport])
+
+  const handleBoundaryDrag = useCallback(
+    (boundary: CutBoundary, newTime: number) => {
+      if (transcriptMutationBlocked) return
+      const snapshot = dragSnapshotRef.current
+      if (!snapshot) return
+
+      const snapped = snapToFrame(Math.max(0, newTime))
+
+      setWords((prev) => {
+        const next = prev.map((word, i) => {
+          const orig = snapshot[i]
+
+          if (boundary.side === 'start') {
+            // Dragging the start-of-cut boundary adjusts where the cut begins.
+            // The cut word (wordIndexAfter) has its start time trimmed.
+            // If dragged far enough past a word's midpoint, toggle its action.
+            const cutIdx = boundary.wordIndexAfter
+            if (cutIdx >= 0 && cutIdx < prev.length && i === cutIdx) {
+              // This is the first cut word — trim its start
+              const clampedStart = Math.max(0, Math.min(snapped, orig.end - 1 / fpsValue))
+              if (Math.abs(word.start - clampedStart) < 0.0001) return word
+              const newStartFrame = typeof word.start_frame === 'number'
+                ? Math.round(clampedStart * fpsValue) + (word.start_frame - Math.round(word.start * fpsValue))
+                : word.start_frame
+              const newSourceStartFrame = typeof word.source_start_frame === 'number'
+                ? Math.round(clampedStart * fpsValue) + (word.source_start_frame - Math.round(word.start * fpsValue))
+                : word.source_start_frame
+              return { ...word, start: Number(clampedStart.toFixed(4)), start_frame: newStartFrame, source_start_frame: newSourceStartFrame }
+            }
+            // Words whose midpoint falls between new and original boundary get toggled
+            const mid = (orig.start + orig.end) / 2
+            if (snapped < boundary.time && mid >= snapped && mid < boundary.time && orig.action !== 'cut') {
+              return { ...word, action: 'cut' as WordAction, start: orig.start, end: orig.end }
+            }
+            if (snapped > boundary.time && mid >= boundary.time && mid < snapped && orig.action === 'cut') {
+              return { ...word, action: 'keep' as WordAction, start: orig.start, end: orig.end }
+            }
+          } else {
+            // Dragging the end-of-cut boundary adjusts where the cut ends.
+            // The cut word (wordIndexBefore) has its end time trimmed.
+            const cutIdx = boundary.wordIndexBefore
+            if (cutIdx >= 0 && cutIdx < prev.length && i === cutIdx) {
+              // This is the last cut word — trim its end
+              const clampedEnd = Math.max(orig.start + 1 / fpsValue, Math.min(snapped, waveform?.duration ?? Infinity))
+              if (Math.abs(word.end - clampedEnd) < 0.0001) return word
+              const newEndFrame = typeof word.end_frame === 'number'
+                ? Math.round(clampedEnd * fpsValue) + (word.end_frame - Math.round(word.end * fpsValue))
+                : word.end_frame
+              const newSourceEndFrame = typeof word.source_end_frame === 'number'
+                ? Math.round(clampedEnd * fpsValue) + (word.source_end_frame - Math.round(word.end * fpsValue))
+                : word.source_end_frame
+              return { ...word, end: Number(clampedEnd.toFixed(4)), end_frame: newEndFrame, source_end_frame: newSourceEndFrame }
+            }
+            // Words whose midpoint falls between original boundary and new position get toggled
+            const mid = (orig.start + orig.end) / 2
+            if (snapped > boundary.time && mid > boundary.time && mid <= snapped && orig.action !== 'cut') {
+              return { ...word, action: 'cut' as WordAction, start: orig.start, end: orig.end }
+            }
+            if (snapped < boundary.time && mid > snapped && mid <= boundary.time && orig.action === 'cut') {
+              return { ...word, action: 'keep' as WordAction, start: orig.start, end: orig.end }
+            }
+          }
+
+          // Restore original times for unaffected words (in case a previous drag modified them)
+          if (word.start !== orig.start || word.end !== orig.end || word.action !== orig.action) {
+            return { ...word, start: orig.start, end: orig.end, action: orig.action }
+          }
+          return word
+        })
+
+        return next
+      })
+    },
+    [transcriptMutationBlocked, snapToFrame, fpsValue, waveform],
+  )
+
+  const handleBoundaryDragEnd = useCallback(() => {
+    dragSnapshotRef.current = null
+    frozenViewportRef.current = undefined
+  }, [])
+
+  const handleViewportChange = useCallback((vp: WaveformViewport | null) => {
+    // null from the waveform means "zoomed all the way out"
+    setWaveformViewport(vp ?? 'full')
+  }, [])
+
+  const handleResetZoom = useCallback(() => {
+    setWaveformViewport('full')
+  }, [])
 
   // Sync words to persistent store whenever they change
   useEffect(() => {
@@ -280,6 +349,14 @@ export function TranscriptEditor() {
     storeContext(transcriptContext)
   }, [transcriptContext, storeContext])
 
+  useEffect(() => {
+    storeSession(transcriptSession)
+  }, [transcriptSession, storeSession])
+
+  useEffect(() => {
+    storeSpeakers(speakerSummaries)
+  }, [speakerSummaries, storeSpeakers])
+
   // Sync waveform to store so it survives page switches
   useEffect(() => {
     storeWaveform(waveform)
@@ -287,8 +364,18 @@ export function TranscriptEditor() {
 
   // Sync silence settings to store
   useEffect(() => {
-    storeSilenceSettings({ threshold: silenceThreshold, minDuration: silenceMinDuration, padding: silencePadding })
-  }, [silenceThreshold, silenceMinDuration, silencePadding, storeSilenceSettings])
+    storeSilenceSettings({
+      threshold: silenceThreshold,
+      minDuration: silenceMinDuration,
+      minFrames: silenceMinFrames,
+      padding: silencePadding,
+    })
+  }, [silenceThreshold, silenceMinDuration, silenceMinFrames, silencePadding, storeSilenceSettings])
+
+  // Keep ref in sync so poll closure can read current play state
+  useEffect(() => {
+    isPlayingRef.current = isPlaying
+  }, [isPlaying])
 
   // Pickup: if transcription completed while component was unmounted
   useEffect(() => {
@@ -298,8 +385,14 @@ export function TranscriptEditor() {
         const normalized = data.words.map((word: any) => normalizeWord(word))
         pendingAutoDetectRef.current = true
         setWords(normalized)
+        setSpeakerSummaries(Array.isArray(data.speakers) ? data.speakers : [])
+        setDetectedFillerRanges([])
         if (data.transcript_context) {
           setTranscriptContext(data.transcript_context)
+        }
+        if (data.transcript_session) {
+          setTranscriptSession(data.transcript_session)
+          staleNotifiedRef.current = false
         }
       }
       useOperationStore.getState().clearResult(TE_OP_NAME)
@@ -320,8 +413,160 @@ export function TranscriptEditor() {
     }
   }, [])
 
+  useEffect(() => {
+    if (!transcriptIsStale) {
+      staleNotifiedRef.current = false
+    }
+  }, [transcriptIsStale])
+
+  useEffect(() => {
+    if (words.length === 0 || transcriptSession) return
+    setTranscriptSession({
+      session_id: 'legacy-transcript-session',
+      timeline_name: null,
+      timeline_signature: '',
+      last_synced_at: new Date().toISOString(),
+      sync_state: 'requires_retranscribe',
+      stale_reason: 'signature_mismatch',
+      origin: 'transcribe',
+    })
+  }, [words.length, transcriptSession])
+
+  const markTranscriptStale = useCallback((
+    reason: TranscriptSession['stale_reason'] = 'external_timeline_change',
+  ) => {
+    setTranscriptSession((prev) => {
+      if (!prev) return prev
+      if (prev.sync_state === 'stale' && prev.stale_reason === reason) {
+        return prev
+      }
+      return {
+        ...prev,
+        sync_state: 'stale',
+        stale_reason: reason,
+      }
+    })
+    if (!staleNotifiedRef.current) {
+      toast.warning('This timeline changed after the transcript was created. Re-transcribe or sync before editing.')
+      staleNotifiedRef.current = true
+    }
+  }, [])
+
+  const requireFreshTranscript = useCallback((message?: string) => {
+    if (!transcriptIsStale) return true
+    if (message) {
+      toast.info(message)
+    }
+    return false
+  }, [transcriptIsStale])
+
+  // Tell the backend to watch for signature changes when we have a fresh transcript
+  const didRegisterWatchRef = useRef(false)
+  const isReconcilingRef = useRef(false)
+
+  useEffect(() => {
+    if (
+      words.length === 0 ||
+      !transcriptSession?.timeline_signature ||
+      transcriptSession.sync_state !== 'fresh' ||
+      transcribing ||
+      applying ||
+      isReconciling
+    ) {
+      // Only send stop if we previously registered
+      if (didRegisterWatchRef.current) {
+        sendWsMessage({ type: 'watch_signature', signature: null, timeline_name: null })
+        didRegisterWatchRef.current = false
+      }
+      return
+    }
+
+    didRegisterWatchRef.current = true
+    sendWsMessage({
+      type: 'watch_signature',
+      signature: transcriptSession.timeline_signature,
+      timeline_name: transcriptSession.timeline_name ?? null,
+    })
+
+    return () => {
+      didRegisterWatchRef.current = false
+      sendWsMessage({ type: 'watch_signature', signature: null, timeline_name: null })
+    }
+  }, [
+    words.length,
+    transcriptSession?.timeline_signature,
+    transcriptSession?.sync_state,
+    transcriptSession?.timeline_name,
+    transcribing,
+    applying,
+    isReconciling,
+  ])
+
+  // Auto-reconcile when the backend pushes a timeline_changed event
+  const autoReconcile = useCallback(async () => {
+    if (!transcriptSession || words.length === 0) return
+    if (transcriptSession.sync_state !== 'fresh') return
+    if (isReconcilingRef.current) return
+
+    isReconcilingRef.current = true
+    setIsReconciling(true)
+    try {
+      const data = await apiFetch('/api/transcript-editor/reconcile', {
+        method: 'POST',
+        body: JSON.stringify({
+          words,
+          transcript_context: transcriptContext,
+          transcript_session: transcriptSession,
+        }),
+      })
+
+      if (data?.success) {
+        const normalizedWords = ((data.words || []) as any[])
+          .map((word) => normalizeWord(word))
+          .map((word) => ({
+            ...word,
+            speaker: undefined,
+            speaker_index: undefined,
+          }))
+          .filter((word) => !isAnalysisMarker(word))
+        setWords(sortTranscriptWords(normalizedWords))
+        setTranscriptContext(data.transcript_context || transcriptContext)
+        setTranscriptSession(data.transcript_session || transcriptSession)
+        setDetectedFillerRanges([])
+        setSpeakerSummaries([])
+        staleNotifiedRef.current = false
+        toast.success('Timeline changed — transcript synced automatically')
+        return
+      }
+
+      // Reconcile failed — fall back to stale modal
+      if (data?.transcript_session) {
+        setTranscriptSession(data.transcript_session)
+      }
+      markTranscriptStale('external_timeline_change')
+    } catch {
+      markTranscriptStale('external_timeline_change')
+    } finally {
+      isReconcilingRef.current = false
+      setIsReconciling(false)
+    }
+  }, [words, transcriptContext, transcriptSession, markTranscriptStale])
+
+  // Stable ref so the WS subscriber never needs to re-register
+  const autoReconcileRef = useRef(autoReconcile)
+  useEffect(() => { autoReconcileRef.current = autoReconcile }, [autoReconcile])
+
+  useEffect(() => {
+    const unsub = subscribe((msg) => {
+      if (msg.type === 'timeline_changed') {
+        void autoReconcileRef.current()
+      }
+    })
+    return unsub
+  }, [])
+
   // Annotation pipeline: mark fillers and repeated words for highlighting
-  const { fillerCount, repeatedCount, filteredText } = useMemo(() => {
+  const { fillerCount, repeatedCount } = useMemo(() => {
     if (words.length === 0) return { fillerCount: 0, repeatedCount: 0, filteredText: '' }
 
     let fillers = 0
@@ -332,14 +577,18 @@ export function TranscriptEditor() {
       const w = words[i]
       if (w.action === 'cut') continue // excluded from filtered text
 
-      const norm = w.word.toLowerCase().replace(/[.,!?;:'"()\-\[\]{}]/g, '').trim()
+      const norm = normalizeSpokenToken(w.word)
 
-      if (autoDetectFillers && FILLER_WORDS.has(norm) && w.word !== '[silence]') {
+      const isDetectedFiller =
+        detectedFillerRanges.some((segment) => wordOverlapsSegment(w, segment)) ||
+        isLikelyFillerWord(w, words[i - 1], words[i + 1])
+
+      if (autoDetectFillers && isDetectedFiller) {
         fillers++
       }
 
       if (autoDetectFillers && i > 0 && norm.length > 1) {
-        const prevNorm = words[i - 1].word.toLowerCase().replace(/[.,!?;:'"()\-\[\]{}]/g, '').trim()
+        const prevNorm = normalizeSpokenToken(words[i - 1].word)
         if (norm === prevNorm) repeats++
       }
 
@@ -347,22 +596,36 @@ export function TranscriptEditor() {
     }
 
     return { fillerCount: fillers, repeatedCount: repeats, filteredText: textParts.join(' ') }
-  }, [words, autoDetectFillers])
+  }, [words, autoDetectFillers, detectedFillerRanges])
 
   // Helper: check if a word is a filler
   const isWordFiller = useCallback((word: TranscriptWord) => {
-    const norm = word.word.toLowerCase().replace(/[.,!?;:'"()\-\[\]{}]/g, '').trim()
-    return autoDetectFillers && FILLER_WORDS.has(norm) && word.word !== '[silence]'
-  }, [autoDetectFillers])
+    if (!autoDetectFillers) return false
+    if (isAudioFillerMarker(word)) return true
+    if (detectedFillerRanges.some((segment) => wordOverlapsSegment(word, segment))) {
+      return true
+    }
+    const index = words.indexOf(word)
+    return isLikelyFillerWord(
+      word,
+      index > 0 ? words[index - 1] : null,
+      index >= 0 && index < words.length - 1 ? words[index + 1] : null
+    )
+  }, [autoDetectFillers, words, detectedFillerRanges])
 
   // Helper: check if a word is a repeat of its predecessor
   const isWordRepeated = useCallback((index: number) => {
     if (!autoDetectFillers || index === 0) return false
-    const norm = words[index].word.toLowerCase().replace(/[.,!?;:'"()\-\[\]{}]/g, '').trim()
+    const norm = normalizeSpokenToken(words[index].word)
     if (norm.length <= 1) return false
-    const prevNorm = words[index - 1].word.toLowerCase().replace(/[.,!?;:'"()\-\[\]{}]/g, '').trim()
+    const prevNorm = normalizeSpokenToken(words[index - 1].word)
     return norm === prevNorm
   }, [words, autoDetectFillers])
+
+  const hasDetectedFillers = useMemo(
+    () => words.some((word) => isWordFiller(word)),
+    [words, isWordFiller]
+  )
 
   // Auto-detect silences + fillers after transcription completes
   useEffect(() => {
@@ -373,19 +636,15 @@ export function TranscriptEditor() {
     handleFindSilences()
   }, [words]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Poll Resolve playhead and highlight the current word in real time (always active)
+  // Fast poll: drift-correct interpolation base from Resolve's playhead (no play-state logic)
   useEffect(() => {
     if (words.length === 0) return
 
     let cancelled = false
     let lastSeconds = -1
-    let prevSec = -1
-    let prevTime = 0
 
     const poll = async () => {
       if (cancelled) return
-
-      // Skip polling during cooldown after user click (let Resolve settle)
       if (Date.now() - lastClickTimeRef.current < 1000) return
 
       try {
@@ -393,54 +652,100 @@ export function TranscriptEditor() {
         if (cancelled || data?.seconds == null) return
 
         const sec = data.seconds as number
-        const now = Date.now()
+        const now = performance.now()
 
-        // Detect play/pause: if playhead moved since last poll
-        if (prevSec >= 0 && now - prevTime < 300) {
-          setIsPlaying(Math.abs(sec - prevSec) > 0.02)
+        // Drift-correct whenever Resolve reports a new position
+        if (Math.abs(sec - playheadSampleRef.current.seconds) > 0.01) {
+          playheadSampleRef.current = { seconds: sec, sampledAt: now }
+          setPlayheadSeconds(sec)
         }
-        prevSec = sec
-        prevTime = now
 
+        // When paused, update active word from polled position
         if (Math.abs(sec - lastSeconds) < 0.005) return
         lastSeconds = sec
-
-        // Binary search for the word at this timestamp
-        let foundIndex: number | null = null
-        let lo = 0
-        let hi = words.length - 1
-        while (lo <= hi) {
-          const mid = Math.floor((lo + hi) / 2)
-          if (sec < words[mid].start) {
-            hi = mid - 1
-          } else if (sec > words[mid].end) {
-            lo = mid + 1
-          } else {
-            foundIndex = mid
-            break
-          }
-        }
-
-        // If between words, snap to the nearest upcoming word
-        if (foundIndex === null && lo < words.length && sec < words[lo].start) {
-          const gap = words[lo].start - sec
-          if (gap < 0.5) foundIndex = lo
-        }
-
-        setActiveWordIndex(foundIndex)
+        setActiveWordIndex((current) => {
+          const next = findActiveWordIndex(words, sec)
+          return current === next ? current : next
+        })
       } catch {
         // Silently fail — Resolve may not be connected
       }
     }
 
-    const interval = setInterval(poll, 100)
-    poll()
+    const interval = window.setInterval(() => void poll(), 120)
+    void poll()
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [words])
 
+  // WebSocket listener: instant transport state sync from backend key-event monitor
+  useEffect(() => {
+    if (words.length === 0) return
+
+    const unsub = subscribe((msg: any) => {
+      if (msg?.type !== 'transport_state') return
+      // Don't override shortly after a user-initiated toggle from FinlayCut
+      if (Date.now() - lastToggleTimeRef.current < 1500) return
+
+      const resolveIsPlaying = msg.is_playing as boolean
+
+      if (resolveIsPlaying && !isPlayingRef.current) {
+        // Resolve started playing — start following from current position
+        if (msg.seconds != null) {
+          playheadSampleRef.current = {
+            seconds: msg.seconds as number,
+            sampledAt: performance.now(),
+          }
+        }
+        setIsPlaying(true)
+        setIsFollowing(true)
+      } else if (!resolveIsPlaying && isPlayingRef.current) {
+        // Resolve stopped — pause and snap to final position
+        setIsPlaying(false)
+        if (msg.seconds != null) {
+          playheadSampleRef.current = {
+            seconds: msg.seconds as number,
+            sampledAt: performance.now(),
+          }
+          setPlayheadSeconds(msg.seconds as number)
+        }
+      }
+    })
+
+    return unsub
+  }, [words])
+
+  // rAF interpolation loop — only runs during playback to smoothly advance the playhead
+  useEffect(() => {
+    if (words.length === 0 || !isPlaying) return
+
+    let cancelled = false
+    let frameHandle = 0
+
+    const tick = () => {
+      if (cancelled) return
+
+      const sample = playheadSampleRef.current
+      const now = performance.now()
+      const estimatedSeconds = sample.seconds + Math.max(0, (now - sample.sampledAt) / 1000)
+
+      setPlayheadSeconds((prev) =>
+        Math.abs(prev - estimatedSeconds) > 0.016 ? estimatedSeconds : prev
+      )
+
+      setActiveWordIndex((current) => {
+        const next = findActiveWordIndex(words, estimatedSeconds)
+        return current === next ? current : next
+      })
+
+      frameHandle = window.requestAnimationFrame(tick)
+    }
+
+    frameHandle = window.requestAnimationFrame(tick)
     return () => {
       cancelled = true
-      clearInterval(interval)
+      window.cancelAnimationFrame(frameHandle)
     }
-  }, [words])
+  }, [words, isPlaying])
 
   // Auto-scroll to the active word
   useEffect(() => {
@@ -452,32 +757,129 @@ export function TranscriptEditor() {
     }
   }, [activeWordIndex, isFollowing])
 
-  // Spacebar play/pause shortcut (with cooldown to prevent double-toggle)
+  // Disable auto-follow on manual wheel scroll during playback
+  useEffect(() => {
+    const container = transcriptContainerRef.current
+    if (!container) return
+
+    const handleWheel = () => {
+      if (isPlaying && isFollowing) {
+        setIsFollowing(false)
+      }
+    }
+
+    container.addEventListener('wheel', handleWheel, { passive: true })
+    return () => {
+      container.removeEventListener('wheel', handleWheel)
+    }
+  }, [isPlaying, isFollowing])
+
+  // Spacebar play/pause shortcut plus hold-key click modes for cut/mute/keep.
   const lastSpaceRef = useRef<number>(0)
+  const arrowDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     if (words.length === 0) return
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.code !== 'Space') return
       const tag = (e.target as HTMLElement)?.tagName?.toLowerCase()
       if (tag === 'input' || tag === 'textarea' || tag === 'select') return
 
-      e.preventDefault()
+      if (e.repeat && (e.code === 'KeyC' || e.code === 'KeyM' || e.code === 'KeyK')) return
 
-      // Cooldown: ignore if pressed within 500ms
-      const now = Date.now()
-      if (now - lastSpaceRef.current < 500) return
-      lastSpaceRef.current = now
+      if (e.code === 'Space') {
+        e.preventDefault()
 
-      apiFetch('/api/resolve/transport', {
-        method: 'POST',
-        body: JSON.stringify({ action: 'toggle' }),
-      }).catch(() => {})
+        const now = Date.now()
+        if (now - lastSpaceRef.current < 500) return
+        lastSpaceRef.current = now
+
+        // Optimistic toggle: immediately flip play state so interpolation starts/stops
+        lastToggleTimeRef.current = Date.now()
+        setIsPlaying((prev) => {
+          if (!prev) {
+            // Starting playback — re-snapshot so interpolation advances from current position
+            playheadSampleRef.current = {
+              ...playheadSampleRef.current,
+              sampledAt: performance.now(),
+            }
+            // Re-enable auto-follow when starting playback
+            setIsFollowing(true)
+          }
+          staleCountRef.current = 0
+          return !prev
+        })
+
+        apiFetch('/api/resolve/transport', {
+          method: 'POST',
+          body: JSON.stringify({ action: 'toggle' }),
+        }).catch(() => {})
+        return
+      }
+
+      if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+        e.preventDefault()
+        const frameDuration = 1 / fpsValue
+        const dir = e.code === 'ArrowRight' ? 1 : -1
+        const current = playheadSampleRef.current.seconds
+        const next = Math.max(0, snapToFrame(current + dir * frameDuration))
+
+        // Update local UI instantly
+        lastClickTimeRef.current = Date.now()
+        playheadSampleRef.current = { seconds: next, sampledAt: performance.now() }
+        setPlayheadSeconds(next)
+        setIsFollowing(false)
+        setActiveWordIndex(findActiveWordIndex(words, next))
+
+        // Debounce API call — only send final position to Resolve
+        if (arrowDebounceRef.current) clearTimeout(arrowDebounceRef.current)
+        arrowDebounceRef.current = setTimeout(() => {
+          arrowDebounceRef.current = null
+          apiFetch('/api/resolve/playhead', {
+            method: 'POST',
+            body: JSON.stringify({ seconds: playheadSampleRef.current.seconds }),
+          }).catch(() => {})
+        }, 80)
+        return
+      }
+
+      if (e.code === 'KeyC' || e.code === 'KeyM' || e.code === 'KeyK') {
+        if (transcriptIsStale) return
+        const nextAction = e.code === 'KeyC'
+          ? 'cut'
+          : e.code === 'KeyM'
+            ? 'mute'
+            : 'keep'
+        heldClickActionRef.current = nextAction
+        setHeldClickAction(nextAction)
+      }
+    }
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (
+        (e.code === 'KeyC' && heldClickActionRef.current === 'cut') ||
+        (e.code === 'KeyM' && heldClickActionRef.current === 'mute') ||
+        (e.code === 'KeyK' && heldClickActionRef.current === 'keep')
+      ) {
+        heldClickActionRef.current = null
+        setHeldClickAction(null)
+      }
+    }
+
+    const clearHeldAction = () => {
+      heldClickActionRef.current = null
+      setHeldClickAction(null)
     }
 
     window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [words.length])
+    window.addEventListener('keyup', handleKeyUp)
+    window.addEventListener('blur', clearHeldAction)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keyup', handleKeyUp)
+      window.removeEventListener('blur', clearHeldAction)
+      if (arrowDebounceRef.current) clearTimeout(arrowDebounceRef.current)
+    }
+  }, [words.length, words, transcriptIsStale, fpsValue, snapToFrame])
 
   const setSelectionRange = useCallback((from: number, to: number, additive = false) => {
     const start = Math.min(from, to)
@@ -495,12 +897,14 @@ export function TranscriptEditor() {
   const handleTranscribe = async (range?: { in_seconds: number; out_seconds: number }) => {
     useOperationStore.getState().startOperation(TE_OP_NAME)
     setResult(null)
+    setSpeakerSummaries([])
+    setDetectedFillerRanges([])
 
     const controller = new AbortController()
     abortRef.current = controller
 
     try {
-      const body: any = { language: language || null }
+      const body: any = { language: language || null, detect_speakers: true }
       if (range) {
         body.in_seconds = range.in_seconds
         body.out_seconds = range.out_seconds
@@ -517,19 +921,31 @@ export function TranscriptEditor() {
       } else {
         const normalized = (data.words || []).map((word: any) => normalizeWord(word))
         const ctx = data.transcript_context || null
+        const nextSession = data.transcript_session || null
+        const nextSpeakers = Array.isArray(data.speakers) ? data.speakers : []
 
         // Write to Zustand stores directly (works even if unmounted)
         useFeatureDataStore.getState().setTranscriptWords(normalized)
         useFeatureDataStore.getState().setTranscriptContext(ctx)
+        useFeatureDataStore.getState().setTranscriptSession(nextSession)
+        useFeatureDataStore.getState().setTranscriptSpeakers(nextSpeakers)
+        setTranscriptSession(nextSession)
+        staleNotifiedRef.current = false
         useOperationStore.getState().completeOperation(TE_OP_NAME, {
           words: data.words,
           transcript_context: ctx,
+          transcript_session: nextSession,
+          speakers: nextSpeakers,
         })
 
         // Update local state for the UI
         pendingAutoDetectRef.current = true
         setWords(normalized)
         setTranscriptContext(ctx)
+        setSpeakerSummaries(nextSpeakers)
+        if (data.speaker_detection_error) {
+          console.warn('Automatic speaker detection failed during transcription:', data.speaker_detection_error)
+        }
 
         // Fetch waveform data in background — also writes to store
         apiFetch('/api/waveform/analyze?samples=800', { method: 'POST' })
@@ -649,9 +1065,22 @@ export function TranscriptEditor() {
   }
 
   const handlePlayPause = async () => {
+    // Optimistic toggle: immediately flip play state so interpolation starts/stops
+    lastToggleTimeRef.current = Date.now()
+    setIsPlaying((prev) => {
+      if (!prev) {
+        playheadSampleRef.current = {
+          ...playheadSampleRef.current,
+          sampledAt: performance.now(),
+        }
+        // Re-enable auto-follow when starting playback
+        setIsFollowing(true)
+      }
+      staleCountRef.current = 0
+      return !prev
+    })
+
     try {
-      // Resolve scripting API: toggle play/pause by sending a keyboard shortcut
-      // or use the transport control endpoint
       await apiFetch('/api/resolve/transport', {
         method: 'POST',
         body: JSON.stringify({ action: isPlaying ? 'stop' : 'play' }),
@@ -659,6 +1088,109 @@ export function TranscriptEditor() {
     } catch {
       // Silently fail
     }
+  }
+
+  const handleAnalyzeSpeakers = async () => {
+    if (words.length === 0) return
+    if (!requireFreshTranscript('This transcript is out of date. Re-transcribe or sync it before running speaker analysis.')) {
+      return
+    }
+
+    const spokenWords = words.filter((word) => !isAnalysisMarker(word))
+    if (spokenWords.length === 0) {
+      toast.info('No spoken words available for speaker analysis')
+      return
+    }
+
+    useOperationStore.getState().startOperation('diarization')
+    setAnalyzingSpeakers(true)
+    setSpeakerSummaries([])
+
+    try {
+      const data = await apiFetch('/api/diarization/annotate-transcript', {
+        method: 'POST',
+        body: JSON.stringify({
+          words: spokenWords.map((word) => ({
+            word: word.word,
+            start: word.start,
+            end: word.end,
+            start_frame: word.start_frame,
+            end_frame: word.end_frame,
+            source_start_frame: word.source_start_frame,
+            source_end_frame: word.source_end_frame,
+            probability: word.probability,
+          })),
+        }),
+      })
+
+      if (data?.error) {
+        useOperationStore.getState().failOperation('diarization', data.error)
+        toast.error(data.error)
+        return
+      }
+
+      let spokenIndex = 0
+      const annotatedWords = words.map((word) => {
+        if (isAnalysisMarker(word)) {
+          return { ...word, speaker: undefined, speaker_index: undefined }
+        }
+
+        const annotated = data.words?.[spokenIndex]
+        spokenIndex++
+        const normalized = normalizeWord({
+          ...word,
+          ...annotated,
+          action: word.action ?? 'keep',
+          selected: word.selected ?? false,
+        })
+        return {
+          ...normalized,
+          action: word.action ?? normalized.action,
+          selected: word.selected ?? normalized.selected,
+        }
+      })
+
+      setWords(annotatedWords)
+      setSpeakerSummaries(data.speakers || [])
+      setShowSpeakers(true)
+      setShowScriptPanel(false)
+      useOperationStore.getState().completeOperation('diarization', data)
+      if (data.method === 'local_fallback') {
+        toast.info('Using local speaker separation fallback. No Hugging Face login is required.')
+      }
+      toast.success(
+        data.speaker_count > 1
+          ? `Detected ${data.speaker_count} speakers`
+          : data.speaker_count === 1
+            ? 'Detected 1 speaker'
+            : 'No clear speakers detected'
+      )
+    } catch (err: any) {
+      useOperationStore.getState().failOperation('diarization', err.message)
+      toast.error(err.message)
+    } finally {
+      setAnalyzingSpeakers(false)
+    }
+  }
+
+  const applySpeakerAction = (speaker: string, mode: 'keepOnly' | 'cut' | 'keep') => {
+    if (!requireFreshTranscript('This transcript is out of date. Re-transcribe or sync it before changing transcript edits.')) {
+      return
+    }
+    setWords((prev) =>
+      prev.map((word) => {
+        if (isAnalysisMarker(word) || !word.speaker) return word
+
+        if (mode === 'keepOnly') {
+          return word.speaker === speaker
+            ? { ...word, action: 'keep' as WordAction }
+            : { ...word, action: 'cut' as WordAction }
+        }
+
+        if (word.speaker !== speaker) return word
+        return { ...word, action: mode === 'cut' ? 'cut' : 'keep' }
+      })
+    )
   }
 
   const handleWordMouseDown = (
@@ -670,25 +1202,38 @@ export function TranscriptEditor() {
     event.preventDefault()
     lastClickTimeRef.current = Date.now()
 
+    const clickAction = heldClickActionRef.current
+    if (clickAction && words[index] && !isSilenceMarker(words[index])) {
+      if (!requireFreshTranscript('This transcript is out of date. Re-transcribe or sync it before changing cut, mute, or keep states.')) {
+        return
+      }
+      setWords((prev) =>
+        prev.map((word, i) =>
+          i === index ? { ...word, action: clickAction, selected: false } : word
+        )
+      )
+      setSelectionAnchor(index)
+      setIsDragging(false)
+      setDragStart(null)
+      void handleJumpToWord(words[index])
+      return
+    }
+
     const additive = event.metaKey || event.ctrlKey
 
     if (event.shiftKey && selectionAnchor !== null) {
       setSelectionRange(selectionAnchor, index, additive)
       setSelectionAnchor(index)
       void handleJumpToWord(words[index])
-      // Sync in/out after shift-click
-      setTimeout(() => setWords((c) => { syncSelectionToInOut(c); return c }), 0)
       return
     }
 
     if (additive) {
-      setWords((prev) => {
-        const next = prev.map((word, i) =>
+      setWords((prev) =>
+        prev.map((word, i) =>
           i === index ? { ...word, selected: !word.selected } : word
         )
-        syncSelectionToInOut(next)
-        return next
-      })
+      )
       setSelectionAnchor(index)
       void handleJumpToWord(words[index])
       return
@@ -709,13 +1254,6 @@ export function TranscriptEditor() {
   const handleWordMouseUp = () => {
     setIsDragging(false)
     setDragStart(null)
-    // Sync selection to Resolve in/out marks (use timeout to get the latest state)
-    setTimeout(() => {
-      setWords((current) => {
-        syncSelectionToInOut(current)
-        return current
-      })
-    }, 0)
   }
 
   const selectSentence = (index: number) => {
@@ -727,11 +1265,12 @@ export function TranscriptEditor() {
 
     setSelectionRange(start, end)
     setSelectionAnchor(index)
-    // Sync in/out after sentence selection
-    setTimeout(() => setWords((c) => { syncSelectionToInOut(c); return c }), 0)
   }
 
   const applyActionToSelection = (action: WordAction) => {
+    if (!requireFreshTranscript('This transcript is out of date. Re-transcribe or sync it before changing transcript edits.')) {
+      return
+    }
     setWords((prev) =>
       prev.map((word) =>
         word.selected && word.action !== action ? { ...word, action } : word
@@ -741,68 +1280,270 @@ export function TranscriptEditor() {
 
   const handleSelectAllWords = () => {
     const allSelected = words.length > 0 && words.every((w) => w.selected)
-    setWords((prev) => {
-      const next = prev.map((word) => ({ ...word, selected: !allSelected }))
-      if (!allSelected) syncSelectionToInOut(next)
-      return next
-    })
+    setWords((prev) => prev.map((word) => ({ ...word, selected: !allSelected })))
   }
 
   const handleKeepAll = () => {
-    setWords((prev) => prev.map((word) => ({ ...word, action: 'keep' })))
+    if (!requireFreshTranscript('This transcript is out of date. Re-transcribe or sync it before resetting transcript edits.')) {
+      return
+    }
+    setWords((prev) =>
+      prev
+        .filter((word) => !isAnalysisMarker(word))
+        .map((word) => ({ ...word, action: 'keep' as WordAction }))
+    )
+    setDetectedFillerRanges([])
   }
 
-  const handleFindFillers = () => {
+  const handleFindFillers = async () => {
     if (words.length === 0) return
+    if (!requireFreshTranscript('This transcript is out of date. Re-transcribe or sync it before finding fillers.')) {
+      return
+    }
     setFindingFillers(true)
 
-    let markedCount = 0
-    let skippedCount = 0
+    try {
+      const baseWords = words.filter((word) => !isAudioFillerMarker(word))
+      const transcriptPayload = {
+        words: baseWords
+          .filter((word) => !isAnalysisMarker(word))
+          .map((word) => ({
+            word: word.word,
+            start: word.start,
+            end: word.end,
+            start_frame: word.start_frame,
+            end_frame: word.end_frame,
+            source_start_frame: word.source_start_frame,
+            source_end_frame: word.source_end_frame,
+            probability: word.probability,
+          })),
+      }
 
-    setWords((prev) =>
-      prev.map((w, i) => {
-        if (w.word === '[silence]' || w.action === 'cut') return w
-        const norm = w.word.toLowerCase().replace(/[.,!?;:'"()\-\[\]{}]/g, '').trim()
-        if (!FILLER_WORDS.has(norm)) return w
+      const data = await apiFetch('/api/filler-words/analyze', {
+        method: 'POST',
+        body: JSON.stringify({ transcript: transcriptPayload }),
+      })
+      if (data?.error) {
+        throw new Error(data.error)
+      }
 
-        // "Avoid harsh cuts" — check gaps to neighboring words
-        // If the filler is jammed right against dialogue with no gap, skip it
-        const prevWord = i > 0 ? prev[i - 1] : null
-        const nextWord = i < prev.length - 1 ? prev[i + 1] : null
-        const gapBefore = prevWord ? w.start - prevWord.end : Infinity
-        const gapAfter = nextWord ? nextWord.start - w.end : Infinity
-
-        if (gapBefore < 0.03 || gapAfter < 0.03) {
-          skippedCount++
-          return w
+      const detections = data?.detections || []
+      const ranges: Segment[] = detections.map((detection: any) => ({
+        start: detection.start,
+        end: detection.end,
+        start_frame: detection.start_frame,
+        end_frame: detection.end_frame,
+        source_start_frame: detection.source_start_frame,
+        source_end_frame: detection.source_end_frame,
+        kind: typeof detection.kind === 'string' ? detection.kind : undefined,
+        label: typeof detection.word === 'string' ? detection.word : undefined,
+      }))
+      const heuristicRanges = baseWords.reduce<Segment[]>((acc, word, index) => {
+          const prevWord = index > 0 ? baseWords[index - 1] : null
+          const nextWord = index < baseWords.length - 1 ? baseWords[index + 1] : null
+          if (isAnalysisMarker(word) || !isLikelyFillerWord(word, prevWord, nextWord)) {
+            return acc
+          }
+          acc.push({
+            start: word.start,
+            end: word.end,
+            start_frame: word.start_frame,
+            end_frame: word.end_frame,
+            source_start_frame: word.source_start_frame,
+            source_end_frame: word.source_end_frame,
+          })
+          return acc
+        }, [])
+      const combinedRanges = [...ranges]
+      for (const heuristic of heuristicRanges) {
+        const overlapsExisting = combinedRanges.some((segment) => {
+          if (
+            typeof heuristic.start_frame === 'number' &&
+            typeof heuristic.end_frame === 'number' &&
+            typeof segment.start_frame === 'number' &&
+            typeof segment.end_frame === 'number'
+          ) {
+            return heuristic.end_frame > segment.start_frame && heuristic.start_frame < segment.end_frame
+          }
+          return heuristic.end > segment.start && heuristic.start < segment.end
+        })
+        if (!overlapsExisting) {
+          combinedRanges.push(heuristic)
         }
+      }
+      setDetectedFillerRanges(combinedRanges)
 
+      let markedCount = 0
+      const wordsWithoutConflictingSilence = baseWords.filter(
+        (word) =>
+          !(
+            isSilenceMarker(word) &&
+            combinedRanges.some((segment) => wordOverlapsSegment(word, segment))
+          )
+      )
+      const nextWords = wordsWithoutConflictingSilence.map((word) => {
+          if (isAnalysisMarker(word) || word.action === 'cut') return word
+          if (!combinedRanges.some((segment) => wordOverlapsSegment(word, segment))) return word
+          markedCount++
+          return { ...word, action: 'cut' as WordAction }
+        })
+
+      const fillerMarkers = detections
+        .filter((detection: any) => detection?.kind === 'audio_hesitation')
+        .filter((detection: any) => {
+          const segment = {
+            start: Number(detection.start || 0),
+            end: Number(detection.end || 0),
+            start_frame:
+              typeof detection.start_frame === 'number' ? detection.start_frame : undefined,
+            end_frame:
+              typeof detection.end_frame === 'number' ? detection.end_frame : undefined,
+          }
+          return !nextWords.some(
+            (word) => !isAnalysisMarker(word) && wordOverlapsSegment(word, segment)
+          )
+        })
+        .map((detection: any) =>
+          normalizeWord({
+            word: '[filler]',
+            kind: 'audio_hesitation',
+            start: detection.start,
+            end: detection.end,
+            start_frame: detection.start_frame,
+            end_frame: detection.end_frame,
+            source_start_frame: detection.source_start_frame,
+            source_end_frame: detection.source_end_frame,
+            label: typeof detection.word === 'string' ? detection.word : undefined,
+            probability: detection.probability ?? 1,
+            action: 'cut',
+            selected: false,
+          })
+        )
+
+      setWords(sortTranscriptWords([...nextWords, ...fillerMarkers]))
+
+      const totalMarked = markedCount + fillerMarkers.length
+      if (totalMarked === 0) {
+        toast.info('No filler words detected')
+      } else {
+        toast.success(
+          `Marked ${totalMarked} filler candidate${totalMarked !== 1 ? 's' : ''} for cutting`
+        )
+      }
+    } catch {
+      let markedCount = 0
+      let skippedCount = 0
+      const localRanges: Segment[] = []
+
+      setWords((prev) =>
+        prev
+          .filter((word) => !isAudioFillerMarker(word))
+          .map((w, i, base) => {
+          if (isAnalysisMarker(w) || w.action === 'cut') return w
+          const prevWord = i > 0 ? base[i - 1] : null
+          const nextWord = i < base.length - 1 ? base[i + 1] : null
+          if (!isLikelyFillerWord(w, prevWord, nextWord)) return w
+
+          const gapBefore = prevWord ? w.start - prevWord.end : Infinity
+          const gapAfter = nextWord ? nextWord.start - w.end : Infinity
+
+          if (gapBefore < 0.03 || gapAfter < 0.03) {
+            skippedCount++
+            return w
+          }
+
+          localRanges.push({
+            start: w.start,
+            end: w.end,
+            start_frame: w.start_frame,
+            end_frame: w.end_frame,
+            source_start_frame: w.source_start_frame,
+            source_end_frame: w.source_end_frame,
+          })
+          markedCount++
+          return { ...w, action: 'cut' as WordAction }
+        })
+      )
+
+      setDetectedFillerRanges(localRanges)
+
+      if (markedCount === 0 && skippedCount > 0) {
+        toast.info(`Found ${skippedCount} filler word${skippedCount !== 1 ? 's' : ''} but skipped — too close to dialogue`)
+      } else if (markedCount === 0) {
+        toast.info('No filler words detected')
+      } else {
+        const skipMsg = skippedCount > 0 ? ` (${skippedCount} skipped to avoid harsh cuts)` : ''
+        toast.success(`Marked ${markedCount} filler word${markedCount !== 1 ? 's' : ''} for cutting${skipMsg}`)
+      }
+    } finally {
+      setFindingFillers(false)
+    }
+  }
+
+  const handleCutDetectedFillers = async () => {
+    if (words.length === 0) return
+    if (!requireFreshTranscript('This transcript is out of date. Re-transcribe or sync it before cutting filler words.')) {
+      return
+    }
+
+    const isHighlightedTranscriptFiller = (
+      word: TranscriptWord,
+      index: number,
+      allWords: TranscriptWord[]
+    ) => {
+      if (isSilenceMarker(word)) return false
+      if (isAudioFillerMarker(word)) return true
+      if (!autoDetectFillers) return false
+      if (detectedFillerRanges.some((segment) => wordOverlapsSegment(word, segment))) return true
+      return isLikelyFillerWord(
+        word,
+        index > 0 ? allWords[index - 1] : null,
+        index < allWords.length - 1 ? allWords[index + 1] : null
+      )
+    }
+
+    const highlightedFillerCount = words.filter((word, index, allWords) =>
+      isHighlightedTranscriptFiller(word, index, allWords)
+    ).length
+
+    if (highlightedFillerCount === 0) {
+      toast.info('No filler words are currently highlighted in the transcript')
+      return
+    }
+
+    let markedCount = 0
+    setWords((prev) =>
+      prev.map((word, index, allWords) => {
+        const shouldCut = isHighlightedTranscriptFiller(word, index, allWords)
+
+        if (!shouldCut || word.action === 'cut') return word
         markedCount++
-        return { ...w, action: 'cut' as WordAction }
+        return { ...word, action: 'cut' as WordAction, selected: false }
       })
     )
 
-    if (markedCount === 0 && skippedCount > 0) {
-      toast.info(`Found ${skippedCount} filler word${skippedCount !== 1 ? 's' : ''} but skipped — too close to dialogue (would cause harsh cuts)`)
-    } else if (markedCount === 0) {
-      toast.info('No filler words detected')
+    if (markedCount === 0) {
+      toast.info('All highlighted filler candidates are already marked for cutting')
     } else {
-      const skipMsg = skippedCount > 0 ? ` (${skippedCount} skipped to avoid harsh cuts)` : ''
-      toast.success(`Marked ${markedCount} filler word${markedCount !== 1 ? 's' : ''} for cutting${skipMsg}`)
+      toast.success(`Marked ${markedCount} highlighted filler candidate${markedCount !== 1 ? 's' : ''} for cutting`)
     }
-
-    setFindingFillers(false)
   }
 
   const handleFindSilences = async () => {
     if (words.length < 2) return
+    if (!requireFreshTranscript('This transcript is out of date. Re-transcribe or sync it before finding silences.')) {
+      return
+    }
     setFindingSilences(true)
 
-    const minGap = silenceMinDuration / 1000 // convert ms to seconds
+    const fps = parseFloat(framerate) || 24
+    const minGap = Math.max(silenceMinDuration / 1000, silenceMinFrames / fps)
     const pad = silencePadding / 1000 // convert ms to seconds
+    const boundaryPadSeconds = Math.max(pad, SAFETY_PADDING_SECONDS)
+    const boundaryPadFrames = Math.ceil(boundaryPadSeconds * fps)
 
     // First remove any previously inserted [silence] markers
-    const cleanWords = words.filter(w => w.word !== '[silence]')
+    const cleanWords = words.filter((w) => !isSilenceMarker(w))
 
     try {
       // Call backend silence detection for audio-level analysis
@@ -811,27 +1552,38 @@ export function TranscriptEditor() {
         body: JSON.stringify({
           threshold_db: silenceThreshold,
           min_duration_ms: silenceMinDuration,
+          min_duration_frames: silenceMinFrames,
           padding_ms: silencePadding,
         }),
       })
 
-      const backendSilences: Array<{ start: number; end: number; duration: number }> =
+      const backendSilences: Array<{ start: number; end: number; duration: number; start_frame?: number; end_frame?: number }> =
         (data?.segments || []).filter((s: any) => s.duration >= minGap)
 
       // Also find gaps between transcript words as a fallback
-      const gapSilences: Array<{ start: number; end: number }> = []
+      const gapSilences: Array<{ start: number; end: number; start_frame?: number; end_frame?: number }> = []
       for (let i = 0; i < cleanWords.length - 1; i++) {
         const gapStart = cleanWords[i].end
         const gapEnd = cleanWords[i + 1].start
         if (gapEnd - gapStart >= minGap) {
-          gapSilences.push({ start: gapStart, end: gapEnd })
+          gapSilences.push({
+            start: gapStart,
+            end: gapEnd,
+            start_frame: cleanWords[i].end_frame,
+            end_frame: cleanWords[i + 1].start_frame,
+          })
         }
       }
 
       // Merge backend + gap silences: use all backend detections plus any
       // transcript gaps that don't overlap with backend detections
-      const allSilences: Array<{ start: number; end: number }> = [
-        ...backendSilences.map(s => ({ start: s.start, end: s.end })),
+      const allSilences: Array<{ start: number; end: number; start_frame?: number; end_frame?: number }> = [
+        ...backendSilences.map(s => ({
+          start: s.start,
+          end: s.end,
+          start_frame: s.start_frame,
+          end_frame: s.end_frame,
+        })),
       ]
       for (const gap of gapSilences) {
         const overlaps = allSilences.some(
@@ -857,16 +1609,45 @@ export function TranscriptEditor() {
         while (silIdx < allSilences.length && allSilences[silIdx].start < nextWordStart) {
           const sil = allSilences[silIdx]
           // Clip silence to the gap between words, with padding to protect dialogue
-          const cutStart = Math.max(sil.start, wordEnd) + Math.max(pad, SAFETY_PADDING_SECONDS)
-          const cutEnd = Math.min(sil.end, nextWordStart) - Math.max(pad, SAFETY_PADDING_SECONDS)
-          if (cutEnd - cutStart > 0.02) { // must be > 20ms to be worth cutting
+          const cutStart = Math.max(sil.start, wordEnd) + boundaryPadSeconds
+          const cutEnd = Math.min(sil.end, nextWordStart) - boundaryPadSeconds
+          if (cutEnd - cutStart >= minGap) {
+            const gapStartFrame =
+              typeof cleanWords[i].end_frame === 'number'
+                ? cleanWords[i].end_frame
+                : typeof sil.start_frame === 'number'
+                  ? sil.start_frame
+                  : undefined
+            const gapEndFrame =
+              i < cleanWords.length - 1 && typeof cleanWords[i + 1].start_frame === 'number'
+                ? cleanWords[i + 1].start_frame
+                : typeof sil.end_frame === 'number'
+                  ? sil.end_frame
+                  : undefined
+            const adjustedStartFrame =
+              typeof gapStartFrame === 'number' ? gapStartFrame + boundaryPadFrames : undefined
+            const adjustedEndFrame =
+              typeof gapEndFrame === 'number' ? gapEndFrame - boundaryPadFrames : undefined
             silenceCount++
             const cutDuration = cutEnd - cutStart
-            silenceTotal += cutDuration
-            newWords.push({
-              word: '[silence]',
-              start: cutStart,
-              end: cutEnd,
+              silenceTotal += cutDuration
+              newWords.push({
+                word: '[silence]',
+                kind: 'silence',
+                start: cutStart,
+                end: cutEnd,
+              start_frame:
+                typeof adjustedStartFrame === 'number' &&
+                typeof adjustedEndFrame === 'number' &&
+                adjustedEndFrame > adjustedStartFrame
+                  ? adjustedStartFrame
+                  : undefined,
+              end_frame:
+                typeof adjustedStartFrame === 'number' &&
+                typeof adjustedEndFrame === 'number' &&
+                adjustedEndFrame > adjustedStartFrame
+                  ? adjustedEndFrame
+                  : undefined,
               probability: 1,
               action: 'cut',
               selected: false,
@@ -877,7 +1658,7 @@ export function TranscriptEditor() {
       }
 
       if (silenceCount === 0) {
-        toast.info(`No silences found at ${silenceThreshold}dB / ${silenceMinDuration}ms`)
+        toast.info(`No silences found at ${silenceThreshold}dB / ${Math.round(minGap * 1000)}ms minimum`)
       } else {
         setWords(newWords)
         toast.success(
@@ -891,20 +1672,45 @@ export function TranscriptEditor() {
       let silenceTotal = 0
 
       for (let i = 0; i < cleanWords.length; i++) {
-        newWords.push(cleanWords[i])
+        const currentWord = cleanWords[i]
+        if (!currentWord) continue
+        newWords.push(currentWord)
         if (i < cleanWords.length - 1) {
-          const gapStart = cleanWords[i].end
-          const gapEnd = cleanWords[i + 1].start
+          const nextWord = cleanWords[i + 1]
+          if (!nextWord) continue
+          const gapStart = currentWord.end
+          const gapEnd = nextWord.start
           if (gapEnd - gapStart >= minGap) {
-            const cutStart = gapStart + Math.max(pad, SAFETY_PADDING_SECONDS)
-            const cutEnd = gapEnd - Math.max(pad, SAFETY_PADDING_SECONDS)
-            if (cutEnd - cutStart > 0.02) { // must be > 20ms to be worth cutting
+            const cutStart = gapStart + boundaryPadSeconds
+            const cutEnd = gapEnd - boundaryPadSeconds
+            if (cutEnd - cutStart >= minGap) {
+              const adjustedStartFrame =
+                typeof currentWord.end_frame === 'number'
+                  ? currentWord.end_frame + boundaryPadFrames
+                  : undefined
+              const adjustedEndFrame =
+                typeof nextWord.start_frame === 'number'
+                  ? nextWord.start_frame - boundaryPadFrames
+                  : undefined
               silenceCount++
               silenceTotal += cutEnd - cutStart
               newWords.push({
                 word: '[silence]',
+                kind: 'silence',
                 start: cutStart,
                 end: cutEnd,
+                start_frame:
+                  typeof adjustedStartFrame === 'number' &&
+                  typeof adjustedEndFrame === 'number' &&
+                  adjustedEndFrame > adjustedStartFrame
+                    ? adjustedStartFrame
+                    : undefined,
+                end_frame:
+                  typeof adjustedStartFrame === 'number' &&
+                  typeof adjustedEndFrame === 'number' &&
+                  adjustedEndFrame > adjustedStartFrame
+                    ? adjustedEndFrame
+                    : undefined,
                 probability: 1,
                 action: 'cut',
                 selected: false,
@@ -927,51 +1733,120 @@ export function TranscriptEditor() {
     }
   }
 
-  // Set Resolve in/out marks when selection changes (debounced to avoid rapid-fire)
-  const inOutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const syncSelectionToInOut = useCallback((currentWords: TranscriptWord[]) => {
-    if (inOutTimerRef.current) clearTimeout(inOutTimerRef.current)
-    inOutTimerRef.current = setTimeout(async () => {
-      const selected = currentWords.filter((w) => w.selected)
-      if (selected.length === 0) return
-      const inSec = Math.min(...selected.map((w) => w.start))
-      const outSec = Math.max(...selected.map((w) => w.end))
-      try {
-        await apiFetch('/api/resolve/in-out', {
-          method: 'POST',
-          body: JSON.stringify({ in_seconds: inSec, out_seconds: outSec }),
-        })
-      } catch {
-        // Silently fail
+  const handleTranscriptFreshnessFailure = useCallback((data: any) => {
+    if (!data?.code) return false
+    if (data.code !== 'TRANSCRIPT_STALE' && data.code !== 'TRANSCRIPT_SESSION_REQUIRED') {
+      return false
+    }
+
+    if (data.code === 'TRANSCRIPT_SESSION_REQUIRED') {
+      setTranscriptSession((prev) => prev ?? {
+        session_id: 'legacy-transcript-session',
+        timeline_name: null,
+        timeline_signature: '',
+        last_synced_at: new Date().toISOString(),
+        sync_state: 'requires_retranscribe',
+        stale_reason: 'signature_mismatch',
+        origin: 'transcribe',
+      })
+    } else {
+      markTranscriptStale('external_timeline_change')
+    }
+
+    return true
+  }, [markTranscriptStale])
+
+  const handleSyncWithoutRetranscribe = async () => {
+    if (!transcriptSession) {
+      toast.error('This transcript is missing freshness metadata. Re-transcribe before syncing it.')
+      return
+    }
+
+    setIsReconciling(true)
+    setResult(null)
+
+    try {
+      const data = await apiFetch('/api/transcript-editor/reconcile', {
+        method: 'POST',
+        body: JSON.stringify({
+          words,
+          transcript_context: transcriptContext,
+          transcript_session: transcriptSession,
+        }),
+      })
+
+      if (data?.success) {
+        const normalizedWords = ((data.words || []) as any[])
+          .map((word) => normalizeWord(word))
+          .map((word) => ({
+            ...word,
+            speaker: undefined,
+            speaker_index: undefined,
+          }))
+          .filter((word) => !isAnalysisMarker(word))
+        setWords(sortTranscriptWords(normalizedWords))
+        setTranscriptContext(data.transcript_context || transcriptContext)
+        setTranscriptSession(data.transcript_session || transcriptSession)
+        setDetectedFillerRanges([])
+        setSpeakerSummaries([])
+        staleNotifiedRef.current = false
+        toast.success(data.message || 'Transcript synced to the current timeline. Re-run fillers, silences, and speakers if needed.')
+        return
       }
-    }, 400)
-  }, [])
+
+      if (data?.transcript_session) {
+        setTranscriptSession(data.transcript_session)
+      } else {
+        setTranscriptSession((prev) => prev ? {
+          ...prev,
+          sync_state: 'requires_retranscribe',
+          stale_reason: data?.reason === 'ambiguous_sync' ? 'ambiguous_sync' : 'content_changed',
+        } : prev)
+      }
+      staleNotifiedRef.current = true
+      toast.error(data?.message || 'This timeline changed in a way that requires a fresh transcription.')
+    } catch (err: any) {
+      toast.error(err.message)
+    } finally {
+      setIsReconciling(false)
+    }
+  }
+
+  const handleRetranscribeCurrentTimeline = () => {
+    void handleTranscribe()
+  }
 
   const handleApply = async () => {
+    if (!requireFreshTranscript('This timeline changed after the transcript was created. Re-transcribe or sync it before applying transcript edits.')) {
+      return
+    }
     setApplying(true)
     setResult(null)
 
     try {
       const fps = parseFloat(framerate) || 24
-      const padFrames = Math.ceil(SAFETY_PADDING_SECONDS * fps)
-      const rawCutSegments = mergeWordSegments(words, (word) => word.action === 'cut')
+      const rawFillerCutSegments = mergeWordSegments(
+        words,
+        (word) => word.action === 'cut' && !isSilenceMarker(word) && isWordFiller(word)
+      )
+      const rawSpeechCutSegments = mergeWordSegments(
+        words,
+        (word) => word.action === 'cut' && !isSilenceMarker(word) && !isWordFiller(word)
+      )
+      const rawSilenceCutSegments = mergeWordSegments(
+        words,
+        (word) => word.action === 'cut' && isSilenceMarker(word)
+      )
       const mutedSegments = mergeWordSegments(words, (word) => word.action === 'mute')
 
-      // Apply safety padding to cut segments — shrink each cut region by 80ms on both
-      // sides so we never clip into the audio of adjacent kept/muted words.
-      // mergeWordSegments already merges adjacent cuts, so boundaries are always
-      // at kept↔cut transitions where this padding matters most.
-      const cutSegments = rawCutSegments
-        .map((seg) => ({
-          ...seg,
-          start: seg.start + SAFETY_PADDING_SECONDS,
-          end: seg.end - SAFETY_PADDING_SECONDS,
-          start_frame: typeof seg.start_frame === 'number' ? seg.start_frame + padFrames : seg.start_frame,
-          end_frame: typeof seg.end_frame === 'number' ? seg.end_frame - padFrames : seg.end_frame,
-          source_start_frame: typeof seg.source_start_frame === 'number' ? seg.source_start_frame + padFrames : seg.source_start_frame,
-          source_end_frame: typeof seg.source_end_frame === 'number' ? seg.source_end_frame - padFrames : seg.source_end_frame,
-        }))
-        .filter((seg) => seg.end - seg.start > 0.02) // drop segments smaller than 20ms
+      const fillerCutSegments = rawFillerCutSegments
+        .map((seg) => adjustFillerSegmentForRemoval(seg, fps))
+        .filter((seg): seg is Segment => Boolean(seg))
+      const speechCutSegments = rawSpeechCutSegments
+        .map((seg) => shrinkSegmentForSafety(seg, fps))
+        .filter((seg): seg is Segment => Boolean(seg))
+      const silenceCutSegments = rawSilenceCutSegments.filter((seg) => seg.end - seg.start > 0.02)
+      const cutSegments = [...fillerCutSegments, ...speechCutSegments, ...silenceCutSegments].sort((a, b) => a.start - b.start)
 
       const data = await apiFetch('/api/transcript-editor/apply', {
         method: 'POST',
@@ -979,17 +1854,27 @@ export function TranscriptEditor() {
           cut_segments: cutSegments,
           muted_segments: mutedSegments,
           transcript_context: transcriptContext,
+          transcript_session: transcriptSession,
         }),
       })
+      if (handleTranscriptFreshnessFailure(data)) {
+        setResult(data)
+        if (data?.error) toast.error(data.error)
+        return
+      }
       if (data?.success) {
-        setWords(prev =>
-          prev
-            .filter(w => w.action !== 'cut')
-            .map(w => ({ ...w, action: 'keep' as WordAction, selected: false }))
-        )
-        // Update transcript context with new timeline bounds so words track correctly
-        if (data.updated_transcript_context) {
-          setTranscriptContext(data.updated_transcript_context)
+        const nextContext = data.updated_transcript_context || transcriptContext
+        const nextTimelineStartFrame =
+          typeof nextContext?.clip_start_frame === 'number' ? nextContext.clip_start_frame : undefined
+        setWords((prev) => retimeWordsAfterCuts(prev, cutSegments, fps, nextTimelineStartFrame))
+        setSpeakerSummaries([])
+        setDetectedFillerRanges([])
+        if (nextContext) {
+          setTranscriptContext(nextContext)
+        }
+        if (data.transcript_session) {
+          setTranscriptSession(data.transcript_session)
+          staleNotifiedRef.current = false
         }
         setResult({
           ...data,
@@ -1009,6 +1894,13 @@ export function TranscriptEditor() {
   }
 
   const handleWaveformClick = async (seconds: number) => {
+    // Immediately snap local playhead so the UI feels instant
+    lastClickTimeRef.current = Date.now()
+    playheadSampleRef.current = { seconds, sampledAt: performance.now() }
+    setPlayheadSeconds(seconds)
+    setIsFollowing(false)
+    setActiveWordIndex(findActiveWordIndex(words, seconds))
+
     try {
       await apiFetch('/api/resolve/playhead', {
         method: 'POST',
@@ -1021,6 +1913,103 @@ export function TranscriptEditor() {
 
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+  const applyScriptEdits = async (editedText: string, sourceLabel = 'Script') => {
+    if (!requireFreshTranscript('This timeline changed after the transcript was created. Re-transcribe or sync it before applying script edits.')) {
+      return
+    }
+    const cleanedText = editedText.replace(/\[\d+:\d{2}(:\d{2})?\]/g, '').trim()
+    const editedWords = cleanedText.split(/\s+/).filter((w) => w.length > 0)
+    const scriptableWords = words.filter((w) => !isAnalysisMarker(w))
+    const originalWords = scriptableWords.map((w) => w.word)
+
+    if (scriptableWords.length === 0) {
+      toast.error('No spoken transcript words available for script matching')
+      return
+    }
+
+    if (editedWords.length === 0) {
+      toast.error(`${sourceLabel} is empty`)
+      return
+    }
+
+    const kept = lcsWordDiff(originalWords, editedWords)
+    const keptCount = kept.filter((k) => k).length
+    const removedCount = kept.filter((k) => !k).length
+
+    if (removedCount === 0) {
+      toast.info('No differences found — script matches')
+      return
+    }
+
+    const matchRate = keptCount / originalWords.length
+    if (matchRate < 0.1) {
+      toast.error(
+        `${sourceLabel} aborted: only ${keptCount} of ${originalWords.length} words matched. ` +
+          'The script may have formatting differences that prevent matching.'
+      )
+      return
+    }
+
+    const scriptWords = scriptableWords.map((w, idx) => ({
+      ...w,
+      action: kept[idx] ? ('keep' as WordAction) : ('cut' as WordAction),
+    }))
+    const cutSegments = mergeWordSegments(scriptWords, (w) => w.action === 'cut')
+    const cutWordsList = scriptableWords.filter((_, idx) => !kept[idx])
+    const cutSeconds = cutWordsList.reduce((sum, w) => sum + (w.end - w.start), 0)
+
+    toast.info(`${sourceLabel}: cutting ${removedCount} words (${cutSeconds.toFixed(1)}s)...`)
+
+    setApplying(true)
+    setResult(null)
+    try {
+      const fps = parseFloat(framerate) || 24
+      const data = await apiFetch('/api/transcript-editor/apply', {
+        method: 'POST',
+        body: JSON.stringify({
+          cut_segments: cutSegments,
+          muted_segments: [],
+          transcript_context: transcriptContext,
+          transcript_session: transcriptSession,
+        }),
+      })
+      if (handleTranscriptFreshnessFailure(data)) {
+        setResult(data)
+        if (data?.error) toast.error(data.error)
+        return
+      }
+      if (data?.success) {
+        const nextContext = data.updated_transcript_context || transcriptContext
+        const nextTimelineStartFrame =
+          typeof nextContext?.clip_start_frame === 'number' ? nextContext.clip_start_frame : undefined
+        setWords(retimeWordsAfterCuts(scriptWords, cutSegments, fps, nextTimelineStartFrame))
+        setSpeakerSummaries([])
+        setDetectedFillerRanges([])
+        if (nextContext) {
+          setTranscriptContext(nextContext)
+        }
+        if (data.transcript_session) {
+          setTranscriptSession(data.transcript_session)
+          staleNotifiedRef.current = false
+        }
+        setScriptText(cleanedText)
+        setResult({
+          ...data,
+          message: data.message || `${sourceLabel} edits applied successfully`,
+        })
+        toast.success(data.message || `${sourceLabel} edits applied successfully`)
+      } else {
+        setResult(data)
+        if (data?.error) toast.error(data.error)
+      }
+    } catch (err: any) {
+      setResult({ error: err.message })
+      toast.error(err.message)
+    } finally {
+      setApplying(false)
+    }
+  }
+
   const handleExportTranscript = () => {
     if (words.length === 0) return
 
@@ -1029,8 +2018,8 @@ export function TranscriptEditor() {
     let currentLine = ''
     let lastTimestamp = -Infinity
 
-    // Filter out cut words and silence markers from export
-    const keptWords = words.filter((w) => w.action !== 'cut' && w.word !== '[silence]')
+    // Filter out cut words and analysis markers from export.
+    const keptWords = words.filter((w) => w.action !== 'cut' && !isAnalysisMarker(w))
 
     for (const word of keptWords) {
       // Inject a timestamp marker when >=10s have passed since the last one
@@ -1079,80 +2068,7 @@ export function TranscriptEditor() {
     const reader = new FileReader()
     reader.onload = async (e) => {
       const editedText = (e.target?.result as string) || ''
-      // Strip timestamp markers like [0:30] or [1:02:30] before comparing
-      const cleanedText = editedText.replace(/\[\d+:\d{2}(:\d{2})?\]/g, '')
-      const editedWords = cleanedText.split(/\s+/).filter((w) => w.length > 0)
-      const originalWords = words.map((w) => w.word)
-
-      if (editedWords.length === 0) {
-        toast.error('Imported file is empty')
-        return
-      }
-
-      const kept = lcsWordDiff(originalWords, editedWords)
-      const keptCount = kept.filter((k) => k).length
-      const removedCount = kept.filter((k) => !k).length
-
-      if (removedCount === 0) {
-        toast.info('No differences found — transcript matches')
-        return
-      }
-
-      // Safety check: if the LCS matched very few words, text normalization
-      // probably failed (e.g. Unicode smart quotes vs straight quotes).
-      // Abort rather than risk cutting the entire timeline.
-      const matchRate = keptCount / originalWords.length
-      if (matchRate < 0.1) {
-        toast.error(
-          `Import aborted: only ${keptCount} of ${originalWords.length} words matched. ` +
-            `The edited file may have formatting differences that prevent matching.`
-        )
-        return
-      }
-
-      // Build cut segments by marking removed words, then using mergeWordSegments
-      // with ALL words (not pre-filtered) so gaps between cut words are respected.
-      const importWords = words.map((w, idx) => ({
-        ...w,
-        action: kept[idx] ? ('keep' as WordAction) : ('cut' as WordAction),
-      }))
-      const cutSegments = mergeWordSegments(importWords, (w) => w.action === 'cut')
-
-      const cutWordsList = words.filter((_, idx) => !kept[idx])
-      const cutSeconds = cutWordsList.reduce((sum, w) => sum + (w.end - w.start), 0)
-
-      toast.info(`Importing: cutting ${removedCount} words (${cutSeconds.toFixed(1)}s)...`)
-
-      // Apply directly to the timeline
-      setApplying(true)
-      setResult(null)
-      try {
-        const data = await apiFetch('/api/transcript-editor/apply', {
-          method: 'POST',
-          body: JSON.stringify({
-            cut_segments: cutSegments,
-            muted_segments: [],
-            transcript_context: transcriptContext,
-          }),
-        })
-        if (data?.success) {
-          setWords([])
-          setTranscriptContext(null)
-          setResult({
-            ...data,
-            message: `${data.message} Re-transcribe to get updated timestamps.`,
-          })
-          toast.success(data.message || 'Imported edits applied successfully')
-        } else {
-          setResult(data)
-          if (data?.error) toast.error(data.error)
-        }
-      } catch (err: any) {
-        setResult({ error: err.message })
-        toast.error(err.message)
-      } finally {
-        setApplying(false)
-      }
+      await applyScriptEdits(editedText, 'Imported script')
     }
     reader.readAsText(file)
 
@@ -1173,6 +2089,13 @@ export function TranscriptEditor() {
     words.length > 0 ? words[words.length - 1].end - words[0].start : 0
   const keptSeconds = Math.max(0, totalSeconds - cutSeconds)
   const hasEdits = cutCount > 0 || muteCount > 0
+  const effectiveMinSilenceMs = Math.max(
+    silenceMinDuration,
+    Math.round((silenceMinFrames / fpsValue) * 1000)
+  )
+  const primarySpeaker = speakerSummaries.find((speaker) => speaker.is_primary_suggestion)
+
+
 
   return (
     <div className="feature-panel">
@@ -1183,357 +2106,82 @@ export function TranscriptEditor() {
         </p>
       </div>
 
-      <Card>
-        <div className="flex items-end gap-3">
-          <div className="flex-1">
-            <label className="text-sm text-resolve-textDim mb-2 block">Language</label>
-            <select
-              value={language}
-              onChange={(event) => setLanguage(event.target.value)}
-              className="w-full bg-resolve-bg border border-resolve-border rounded-lg px-3 py-2 text-sm text-resolve-text"
-            >
-              <option value="">Auto-detect</option>
-              <option value="en">English</option>
-              <option value="es">Spanish</option>
-              <option value="fr">French</option>
-              <option value="de">German</option>
-              <option value="ja">Japanese</option>
-              <option value="ko">Korean</option>
-              <option value="zh">Chinese</option>
-              <option value="pt">Portuguese</option>
-              <option value="it">Italian</option>
-            </select>
-          </div>
-          {transcribing ? (
-            abortRef.current ? (
-              <Button onClick={handleCancel} variant="ghost" size="lg">
-                Cancel
-              </Button>
-            ) : (
-              <Button disabled size="lg" variant="ghost">
-                Transcription in progress...
-              </Button>
-            )
+      <div className="flex flex-wrap items-center gap-3">
+        <select
+          value={language}
+          onChange={(event) => setLanguage(event.target.value)}
+          className="bg-resolve-bg border border-resolve-border rounded-lg px-3 py-2 text-sm text-resolve-text"
+        >
+          <option value="">Auto-detect</option>
+          <option value="en">English</option>
+          <option value="es">Spanish</option>
+          <option value="fr">French</option>
+          <option value="de">German</option>
+          <option value="ja">Japanese</option>
+          <option value="ko">Korean</option>
+          <option value="zh">Chinese</option>
+          <option value="pt">Portuguese</option>
+          <option value="it">Italian</option>
+        </select>
+        {transcribing ? (
+          abortRef.current ? (
+            <Button onClick={handleCancel} variant="ghost">
+              Cancel
+            </Button>
           ) : (
-            <div className="flex items-center gap-2">
-              <Button onClick={() => handleTranscribe()} size="lg">
-                {words.length > 0 ? 'Re-Transcribe' : 'Transcribe'}
-              </Button>
-              <Button
-                onClick={handleTranscribeSelection}
-                variant="ghost"
-                size="lg"
-                title="Transcribe only the in/out range set on your DaVinci Resolve timeline (I and O keys)"
-              >
-                Transcribe Selection
-              </Button>
-            </div>
-          )}
-        </div>
-        {words.length > 0 && !transcribing && (
-          <p className="mt-3 text-xs text-resolve-textMuted">
-            Re-transcribe replaces the current transcript only after the new transcription finishes.
-          </p>
+            <Button disabled variant="ghost">
+              Transcribing...
+            </Button>
+          )
+        ) : (
+          <>
+            <Button onClick={() => handleTranscribe()}>
+              {words.length > 0 ? 'Re-Transcribe' : 'Transcribe'}
+            </Button>
+            <Button
+              onClick={handleTranscribeSelection}
+              variant="ghost"
+              title="Transcribe only the in/out range set on your DaVinci Resolve timeline (I and O keys)"
+            >
+              Transcribe Selection
+            </Button>
+          </>
         )}
-      </Card>
+      </div>
 
       {transcribing && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
-
-      {words.length > 0 && (
-        <>
-          {/* Toolbar */}
-          <Card className="!py-2.5 space-y-2">
-            <div className="flex items-center gap-2">
-              <Button
-                size="sm"
-                onClick={handlePlayPause}
-                className={isPlaying
-                  ? 'bg-resolve-success/20 hover:bg-resolve-success/30 text-resolve-success border border-resolve-success/40'
-                  : 'bg-resolve-accent hover:bg-resolve-accentHover text-white'}
-                title="Spacebar"
-              >
-                {isPlaying ? 'Pause' : 'Play'}
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setIsFollowing((f) => !f)}
-                className={isFollowing ? 'border border-resolve-accent/50 text-resolve-accent' : ''}
-                title="Auto-scroll transcript with playback"
-              >
-                {isFollowing ? 'Scrolling' : 'Scroll'}
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setShowTimestamps((t) => !t)}
-                className={showTimestamps ? 'border border-resolve-accent/50 text-resolve-accent' : ''}
-              >
-                Timestamps
-              </Button>
-              <div className="w-px h-5 bg-resolve-border mx-1" />
-              <Button
-                variant="danger"
-                size="sm"
-                onClick={() => applyActionToSelection('cut')}
-                disabled={selectedCount === 0}
-              >
-                Cut
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => applyActionToSelection('mute')}
-                disabled={selectedCount === 0}
-                className="border border-resolve-warning/30 text-resolve-warning hover:bg-resolve-warning/10"
-              >
-                Mute
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => applyActionToSelection('keep')}
-                disabled={selectedCount === 0}
-              >
-                Keep
-              </Button>
-              <div className="w-px h-5 bg-resolve-border mx-1" />
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={handleFindFillers}
-                loading={findingFillers}
-                title="Detect filler words (um, uh, uhh, hmm, er, ah) and mark them for cutting. Skips fillers that are too close to dialogue to avoid harsh cuts."
-              >
-                Find Fillers
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setAutoDetectFillers(f => !f)}
-                className={autoDetectFillers ? 'border border-orange-500/50 text-orange-400' : ''}
-                title="Highlight filler words and repeated consecutive words in the transcript"
-              >
-                Highlight
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setShowSilenceSettings(s => !s)}
-                className={showSilenceSettings ? 'border border-resolve-accent/50 text-resolve-accent' : ''}
-                title="Show silence detection settings"
-              >
-                Silences
-              </Button>
-              <div className="flex-1" />
-              <Button variant="ghost" size="sm" onClick={handleSelectAllWords}>
-                {words.length > 0 && words.every((w) => w.selected) ? 'Deselect All' : 'Select All'}
-              </Button>
-              <Button variant="ghost" size="sm" onClick={handleKeepAll}>
-                Reset All
-              </Button>
-            </div>
-            <div className="flex items-center justify-between text-xs text-resolve-textMuted">
-              <div className="flex items-center gap-3">
-                <span>{selectedCount} selected</span>
-                {cutCount > 0 && <span className="text-resolve-error">{cutCount} cut</span>}
-                {muteCount > 0 && <span className="text-resolve-warning">{muteCount} muted</span>}
-                {autoDetectFillers && fillerCount > 0 && <span className="text-orange-400">{fillerCount} filler{fillerCount !== 1 ? 's' : ''}</span>}
-                {autoDetectFillers && repeatedCount > 0 && <span className="text-orange-400">{repeatedCount} repeat{repeatedCount !== 1 ? 's' : ''}</span>}
+      {analyzingSpeakers && (
+        <ProgressBar progress={speakerProgress} message={speakerMessage} elapsed={speakerElapsed} eta={speakerEta} />
+      )}
+      {words.length > 0 && transcriptIsStale && (
+        <Card className="border-amber-500/30 bg-amber-500/5">
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-amber-200">
+                This timeline changed after this transcript was created. Re-transcribe before applying more transcript edits.
               </div>
-              <div className="flex items-center gap-2">
-                <button onClick={handleExportTranscript} className="hover:text-resolve-text transition-colors">
-                  Export
-                </button>
-                <span className="text-resolve-border">|</span>
-                <button onClick={() => fileInputRef.current?.click()} className="hover:text-resolve-text transition-colors">
-                  Import
-                </button>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".txt,text/plain"
-                  onChange={handleImportTranscript}
-                  className="hidden"
-                />
+              <div className="mt-1 text-xs text-amber-100/80">
+                {transcriptSession?.sync_state === 'requires_retranscribe'
+                  ? 'This timeline changed in a way that requires a fresh transcription.'
+                  : 'To keep transcript edits safe, either re-transcribe the current timeline or try to sync this transcript to the current timeline.'}
               </div>
             </div>
-            {showSilenceSettings && (
-              <div className="pt-2 mt-2 border-t border-resolve-border space-y-3">
-                <div className="grid grid-cols-3 gap-4">
-                  <Slider
-                    label="Threshold"
-                    value={silenceThreshold}
-                    onChange={setSilenceThreshold}
-                    min={-60}
-                    max={-20}
-                    unit=" dB"
-                  />
-                  <Slider
-                    label="Min Duration"
-                    value={silenceMinDuration}
-                    onChange={setSilenceMinDuration}
-                    min={100}
-                    max={3000}
-                    step={50}
-                    unit=" ms"
-                  />
-                  <Slider
-                    label="Padding"
-                    value={silencePadding}
-                    onChange={setSilencePadding}
-                    min={0}
-                    max={500}
-                    step={25}
-                    unit=" ms"
-                  />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-resolve-textMuted">
-                    {silenceThreshold}dB
-                    {' · '}Min: {silenceMinDuration}ms ({Math.round((silenceMinDuration / 1000) * (parseFloat(framerate) || 24))}f)
-                    {' · '}Pad: {silencePadding}ms ({Math.round((silencePadding / 1000) * (parseFloat(framerate) || 24))}f)
-                  </span>
-                  <Button
-                    size="sm"
-                    onClick={handleFindSilences}
-                    loading={findingSilences}
-                  >
-                    Find Silences
-                  </Button>
-                </div>
-              </div>
-            )}
-          </Card>
-
-          {waveform && (
-            <Card className="!p-3">
-              <WaveformDisplay
-                amplitudes={waveform.amplitudes}
-                duration={waveform.duration}
-                words={words}
-                onTimeClick={handleWaveformClick}
-              />
-            </Card>
-          )}
-
-          <Card className="!p-4">
-            <div
-              ref={transcriptContainerRef}
-              className="leading-8 select-none"
-              style={{ userSelect: 'none' }}
-            >
-              {(() => {
-                const elements: React.ReactNode[] = []
-                let lastTimestampSec = -Infinity
-
-                for (let index = 0; index < words.length; index++) {
-                  const word = words[index]
-                  const isActive = index === activeWordIndex
-
-                  // Insert timestamp badge every ~10 seconds
-                  if (showTimestamps && word.start - lastTimestampSec >= 10) {
-                    lastTimestampSec = word.start
-                    elements.push(
-                      <span
-                        key={`ts-${index}`}
-                        className="inline-block mx-1 px-1.5 py-0.5 rounded bg-resolve-accent/15 text-resolve-accent text-[10px] font-mono align-middle select-none cursor-default"
-                        title={`Timestamp: ${formatTimestamp(word.start)}`}
-                      >
-                        {formatTimestamp(word.start)}
-                      </span>
-                    )
-                  }
-
-                  const isFiller = isWordFiller(word)
-                  const isRepeated = isWordRepeated(index)
-                  const isFillerOrRepeat = isFiller || isRepeated
-
-                  const actionClass =
-                    word.action === 'cut'
-                      ? 'bg-resolve-error/20 text-resolve-error line-through opacity-70 hover:opacity-90'
-                      : word.action === 'mute'
-                        ? 'bg-resolve-warning/20 text-resolve-warning hover:bg-resolve-warning/30'
-                        : isFillerOrRepeat
-                          ? 'bg-orange-500/20 text-orange-300 hover:bg-orange-500/30'
-                          : 'text-resolve-text hover:bg-resolve-accent/10'
-
-                  // Build display text and tooltip for silence markers
-                  const isSilenceMarker = word.word === '[silence]'
-                  const silenceDuration = word.end - word.start
-                  const fps = parseFloat(framerate) || 24
-                  const silenceFrames = Math.round(silenceDuration * fps)
-                  const silenceLabel = isSilenceMarker
-                    ? `[silence ${silenceDuration.toFixed(2)}s / ${silenceFrames}f]`
-                    : word.word
-                  const fillerTag = isFiller ? ' [filler]' : isRepeated ? ' [repeated]' : ''
-                  const wordTitle = isSilenceMarker
-                    ? `Silence: ${silenceDuration.toFixed(2)}s (${silenceFrames} frames) | ${formatTimestamp(word.start)} - ${formatTimestamp(word.end)}`
-                    : `${formatTimestamp(word.start)} - ${formatTimestamp(word.end)}${fillerTag}`
-
-                  elements.push(
-                    <span
-                      key={index}
-                      ref={isActive ? activeWordRef : undefined}
-                      onMouseDown={(event) => handleWordMouseDown(index, event)}
-                      onMouseEnter={() => handleWordMouseEnter(index)}
-                      onMouseUp={handleWordMouseUp}
-                      onDoubleClick={(event) => {
-                        event.preventDefault()
-                        selectSentence(index)
-                      }}
-                      className={`inline-block px-0.5 py-0.5 mx-0.5 rounded cursor-pointer text-sm ${
-                        isSilenceMarker ? 'font-mono text-[11px] ' : ''
-                      }${
-                        isActive
-                          ? 'bg-resolve-accent text-white font-semibold transition-all duration-75 ease-out'
-                          : `transition-all duration-100 ${actionClass}`
-                      } ${
-                        word.selected && !isActive
-                          ? 'ring-1 ring-resolve-accent ring-inset bg-resolve-accent/10'
-                          : ''
-                      }`}
-                      title={wordTitle}
-                    >
-                      {silenceLabel}
-                    </span>
-                  )
-                }
-
-                return elements
-              })()}
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" onClick={handleRetranscribeCurrentTimeline}>
+                Re-Transcribe
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => void handleSyncWithoutRetranscribe()} loading={isReconciling}>
+                Try Sync Without Re-Transcribe
+              </Button>
             </div>
-          </Card>
-
-          <Card className="!py-3">
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-sm text-resolve-textDim">
-                <span className="text-resolve-text font-medium">
-                  {formatDuration(keptSeconds)}
-                </span>{' '}
-                kept of <span>{formatDuration(totalSeconds)}</span>
-                {muteSeconds > 0 && (
-                  <span className="ml-2 text-resolve-warning">
-                    ({muteSeconds.toFixed(1)}s muted)
-                  </span>
-                )}
-              </div>
-              <ConfirmApply
-                onConfirm={handleApply}
-                loading={applying}
-                disabled={!hasEdits}
-                description={`This will apply ${cutCount} cut words (${cutSeconds.toFixed(1)}s removed) and ${muteCount} muted words (${muteSeconds.toFixed(1)}s silenced).`}
-              >
-                Apply Edits
-              </ConfirmApply>
-            </div>
-          </Card>
-        </>
+          </div>
+        </Card>
       )}
 
+      {/* Error/success result cards */}
       {result?.error && (
         <Card className="border-resolve-error/30">
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <p className="text-sm text-resolve-error flex-1">
               {operationBlocked
                 ? 'A previous operation got stuck and is blocking new requests.'
@@ -1547,26 +2195,140 @@ export function TranscriptEditor() {
           </div>
         </Card>
       )}
-      {result?.success && (
-        <Card className="border-resolve-success/30">
-          <p className="text-sm text-resolve-success">{result.message}</p>
-        </Card>
+
+      {words.length > 0 && (
+        <>
+          <TranscriptToolbar
+            isPlaying={isPlaying}
+            isFollowing={isFollowing}
+            showTimestamps={showTimestamps}
+            onPlayPause={handlePlayPause}
+            onToggleTimestamps={() => setShowTimestamps((t) => !t)}
+            selectedCount={selectedCount}
+            onCutSelection={() => applyActionToSelection('cut')}
+            onMuteSelection={() => applyActionToSelection('mute')}
+            onKeepSelection={() => applyActionToSelection('keep')}
+            onFindFillers={handleFindFillers}
+            findingFillers={findingFillers}
+            onCutFillers={() => void handleCutDetectedFillers()}
+            hasDetectedFillers={hasDetectedFillers}
+            autoDetectFillers={autoDetectFillers}
+            onToggleAutoDetect={() => setAutoDetectFillers(f => !f)}
+            fillerCount={fillerCount}
+            repeatedCount={repeatedCount}
+            onToggleSilenceSettings={() => setShowSilenceSettings(s => !s)}
+            showSilenceSettings={showSilenceSettings}
+            onSpeakers={() => {
+              if (speakerSummaries.length > 0) {
+                setShowSpeakers((s) => !s)
+              } else {
+                handleAnalyzeSpeakers()
+              }
+            }}
+            analyzingSpeakers={analyzingSpeakers}
+            showSpeakers={showSpeakers && speakerSummaries.length > 0}
+            onToggleScriptPanel={() => setShowScriptPanel((open) => !open)}
+            showScriptPanel={showScriptPanel}
+            allSelected={words.length > 0 && words.every((w) => w.selected)}
+            onSelectAll={handleSelectAllWords}
+            onKeepAll={handleKeepAll}
+            cutCount={cutCount}
+            muteCount={muteCount}
+            heldClickAction={heldClickAction}
+            primarySpeaker={primarySpeaker ?? null}
+            onExport={handleExportTranscript}
+            transcriptMutationBlocked={transcriptMutationBlocked}
+          />
+
+          {showSilenceSettings && (
+            <SilenceSettingsPanel
+              silenceThreshold={silenceThreshold}
+              silenceMinDuration={silenceMinDuration}
+              silenceMinFrames={silenceMinFrames}
+              silencePadding={silencePadding}
+              onThresholdChange={setSilenceThreshold}
+              onMinDurationChange={setSilenceMinDuration}
+              onMinFramesChange={setSilenceMinFrames}
+              onPaddingChange={setSilencePadding}
+              effectiveMinSilenceMs={effectiveMinSilenceMs}
+              framerate={framerate}
+              findingSilences={findingSilences}
+              onFindSilences={handleFindSilences}
+              transcriptMutationBlocked={transcriptMutationBlocked}
+            />
+          )}
+          {showSpeakers && speakerSummaries.length > 0 && (
+            <SpeakerPanel
+              speakers={speakerSummaries}
+              onSpeakerAction={applySpeakerAction}
+              transcriptMutationBlocked={transcriptMutationBlocked}
+            />
+          )}
+          {showScriptPanel && (
+            <ScriptCutPanel
+              scriptText={scriptText}
+              onScriptTextChange={setScriptText}
+              onApplyScript={() => applyScriptEdits(scriptText, 'Script cut')}
+              transcriptIsStale={transcriptIsStale}
+              transcriptMutationBlocked={transcriptMutationBlocked}
+            />
+          )}
+
+          {waveform && (
+            <WaveformCard
+              waveform={waveform}
+              words={words}
+              viewport={effectiveViewport}
+              cutBoundaries={cutBoundaries}
+              playheadSeconds={playheadSeconds}
+              framerate={framerate}
+              onTimeClick={handleWaveformClick}
+              onBoundaryDragStart={handleBoundaryDragStart}
+              onBoundaryDrag={handleBoundaryDrag}
+              onBoundaryDragEnd={handleBoundaryDragEnd}
+              onViewportChange={handleViewportChange}
+              onResetZoom={handleResetZoom}
+            />
+          )}
+
+          <Card className="!p-0">
+            <div
+              ref={transcriptContainerRef}
+              className="p-4 select-none break-words leading-7 sm:leading-8"
+              style={{ userSelect: 'none' }}
+            >
+              <TranscriptWords
+                words={words}
+                activeWordIndex={activeWordIndex}
+                activeWordRef={activeWordRef}
+                showTimestamps={showTimestamps}
+                framerate={framerate}
+                autoDetectFillers={autoDetectFillers}
+                isWordFiller={isWordFiller}
+                isWordRepeated={isWordRepeated}
+                onWordMouseDown={handleWordMouseDown}
+                onWordMouseEnter={handleWordMouseEnter}
+                onWordMouseUp={handleWordMouseUp}
+                onDoubleClick={selectSentence}
+              />
+            </div>
+          </Card>
+
+          <TranscriptFooter
+            keptSeconds={keptSeconds}
+            totalSeconds={totalSeconds}
+            muteSeconds={muteSeconds}
+            cutCount={cutCount}
+            muteCount={muteCount}
+            cutSeconds={cutSeconds}
+            hasEdits={hasEdits}
+            applying={applying}
+            transcriptMutationBlocked={transcriptMutationBlocked}
+            onApply={handleApply}
+          />
+        </>
       )}
+
     </div>
   )
-}
-
-function formatTimestamp(seconds: number): string {
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  const s = Math.floor(seconds % 60)
-  if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
-  return `${m}:${s.toString().padStart(2, '0')}`
-}
-
-function formatDuration(seconds: number): string {
-  const m = Math.floor(seconds / 60)
-  const s = Math.floor(seconds % 60)
-  if (m > 0) return `${m}m ${s}s`
-  return `${s}s`
 }

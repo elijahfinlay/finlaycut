@@ -1,18 +1,118 @@
 """Silence removal endpoints."""
 
-import asyncio
 import logging
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter
 from models.silence import SilenceConfig, SilenceApplyRequest
 from services.resolve_service import resolve_service
 from services.audio_service import audio_service
 from utils.audio_utils import extract_audio, extract_audio_segment
 from utils.operation_queue import heavy_operation
+from utils.timeline_audio import assemble_current_timeline_audio
 from api.websocket import manager
 
 logger = logging.getLogger("finlaycut.silence")
 
 router = APIRouter()
+
+
+def _merge_frame_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    valid = sorted((int(start), int(end)) for start, end in ranges if int(end) > int(start))
+    if not valid:
+        return []
+
+    merged = [valid[0]]
+    for start, end in valid[1:]:
+        prev_start, prev_end = merged[-1]
+        if start <= prev_end:
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _subtract_frame_ranges(
+    base_start: int,
+    base_end: int,
+    cuts: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    if base_end <= base_start:
+        return []
+
+    if not cuts:
+        return [(base_start, base_end)]
+
+    remaining: list[tuple[int, int]] = []
+    cursor = int(base_start)
+    for cut_start, cut_end in cuts:
+        if cut_end <= cursor:
+            continue
+        if cut_start >= base_end:
+            break
+        if cut_start > cursor:
+            remaining.append((cursor, min(cut_start, base_end)))
+        cursor = max(cursor, cut_end)
+        if cursor >= base_end:
+            break
+
+    if cursor < base_end:
+        remaining.append((cursor, base_end))
+
+    return remaining
+
+
+def _frame_range_to_segment(start_frame: int, end_frame: int, timeline_start_frame: int, fps: float) -> dict:
+    return {
+        "start_frame": int(start_frame),
+        "end_frame": int(end_frame),
+        "start": (int(start_frame) - int(timeline_start_frame)) / float(fps),
+        "end": (int(end_frame) - int(timeline_start_frame)) / float(fps),
+        "duration": max(0.0, (int(end_frame) - int(start_frame)) / float(fps)),
+        "selected": True,
+    }
+
+
+def _merge_detected_segments(segments: list[dict]) -> list[dict]:
+    normalized = []
+    for seg in segments:
+        start_frame = seg.get("start_frame")
+        end_frame = seg.get("end_frame")
+        if start_frame is None or end_frame is None or int(end_frame) <= int(start_frame):
+            continue
+        normalized.append({
+            "start_frame": int(start_frame),
+            "end_frame": int(end_frame),
+            "kind": seg.get("kind"),
+            "boundary_source": seg.get("boundary_source"),
+        })
+
+    if not normalized:
+        return []
+
+    normalized.sort(key=lambda seg: (seg["start_frame"], seg["end_frame"]))
+    merged = [normalized[0]]
+    for seg in normalized[1:]:
+        prev = merged[-1]
+        if seg["start_frame"] <= prev["end_frame"] and seg.get("kind") == prev.get("kind"):
+            prev["end_frame"] = max(prev["end_frame"], seg["end_frame"])
+            if seg.get("boundary_source") == "waveform" or prev.get("boundary_source") == "waveform":
+                prev["boundary_source"] = "waveform"
+        else:
+            merged.append(seg)
+    return merged
+
+
+def _trim_segment_by_padding(segment: dict, padding_ms: int) -> dict | None:
+    padding_seconds = max(0, int(padding_ms)) / 1000.0
+    start = float(segment.get("start", 0.0)) + padding_seconds
+    end = float(segment.get("end", 0.0)) - padding_seconds
+    if end <= start:
+        return None
+
+    updated = dict(segment)
+    updated["start"] = round(start, 4)
+    updated["end"] = round(end, 4)
+    updated["duration"] = round(updated["end"] - updated["start"], 4)
+    return updated
 
 
 @router.post("/analyze")
@@ -36,6 +136,10 @@ async def analyze_silence(config: SilenceConfig):
     fps_str = timeline.GetSetting("timelineFrameRate") if timeline else None
     fps = float(fps_str) if fps_str else 24.0
     timeline_start_frame = timeline.GetStartFrame() if timeline else 0
+    effective_min_duration_ms = max(
+        int(config.min_duration_ms),
+        int(round((max(14, int(config.min_duration_frames)) / fps) * 1000.0)),
+    )
 
     logger.info("Silence analysis: %d clips on timeline", len(clips))
 
@@ -99,19 +203,61 @@ async def analyze_silence(config: SilenceConfig):
             silences = await audio_service.detect_silence_with_progress(
                 audio_path,
                 threshold_db=config.threshold_db,
-                min_duration_ms=config.min_duration_ms,
+                min_duration_ms=effective_min_duration_ms,
                 progress_fn=progress_cb,
             )
+            profile = audio_service.build_waveform_profile(audio_path)
+            silences = audio_service.refine_silence_segments_to_waveform(
+                audio_path,
+                silences,
+                min_duration_ms=max(20, int(effective_min_duration_ms * 0.25)),
+                profile=profile,
+            )
+
+            quiet_speech_segments = audio_service.detect_low_prominence_speech(
+                audio_path,
+                threshold_db=config.threshold_db,
+                min_duration_ms=max(250, int(effective_min_duration_ms * 0.85)),
+                quiet_delta_db=12.0,
+            )
+            quiet_speech_segments = audio_service.refine_segments_to_low_energy(
+                audio_path,
+                quiet_speech_segments,
+                max_shift_ms=40,
+                min_duration_ms=max(120, int(effective_min_duration_ms * 0.5)),
+                profile=profile,
+            )
+            for segment in quiet_speech_segments:
+                segment["boundary_source"] = "waveform"
+            candidate_segments = [*silences, *quiet_speech_segments]
 
             # Offset silence timestamps to timeline time
-            for s in silences:
+            for s in candidate_segments:
                 s["start"] += clip_timeline_offset
                 s["end"] += clip_timeline_offset
+                s["start_frame"] = clip_start_frame + int(round((s["start"] - clip_timeline_offset) * fps))
+                s["end_frame"] = clip_start_frame + int(round((s["end"] - clip_timeline_offset) * fps))
 
-            all_silences.extend(silences)
+            all_silences.extend(candidate_segments)
 
-        # Sort by start time and merge overlapping silences from adjacent clips
-        all_silences.sort(key=lambda s: s["start"])
+        merged_segments = _merge_detected_segments([
+            {
+                **s,
+                "start_frame": int(s.get("start_frame", timeline_start_frame + int(round(s["start"] * fps)))),
+                "end_frame": int(s.get("end_frame", timeline_start_frame + int(round(s["end"] * fps)))),
+            }
+            for s in all_silences
+        ])
+        all_silences = []
+        for seg in merged_segments:
+            result_seg = _frame_range_to_segment(
+                seg["start_frame"], seg["end_frame"], timeline_start_frame, fps
+            )
+            if seg.get("kind"):
+                result_seg["kind"] = seg["kind"]
+            if seg.get("boundary_source"):
+                result_seg["boundary_source"] = seg["boundary_source"]
+            all_silences.append(result_seg)
 
         total_silence = sum(s["duration"] for s in all_silences)
 
@@ -121,6 +267,7 @@ async def analyze_silence(config: SilenceConfig):
             "segments": all_silences,
             "total_silence_seconds": total_silence,
             "segment_count": len(all_silences),
+            "effective_min_duration_ms": effective_min_duration_ms,
         }
     except Exception as e:
         await manager.send_error("silence", str(e))
@@ -169,30 +316,71 @@ async def apply_silence_removal(request: SilenceApplyRequest):
         tl_end = timeline.GetEndFrame()
         total_duration = (tl_end - tl_start) / fps
 
-        # Sort silences by start time
-        silences_sorted = sorted(selected_silences, key=lambda s: s.start)
-        padding_s = request.padding_ms / 1000.0
+        await manager.send_progress("silence_apply", 0.3, "Assembling current timeline audio...")
+        assembled_audio, assembled_fps, assembled_tl_start, _assembled_tl_end = assemble_current_timeline_audio()
+        if not assembled_audio or assembled_fps is None or assembled_tl_start is None:
+            return {"error": "Could not assemble current timeline audio"}
 
-        # Build the KEPT segments (everything that is NOT a selected silence)
-        kept_segments = []
-        cursor = 0.0
-        for silence in silences_sorted:
-            # Apply padding: shrink the silence by padding on each side
-            cut_start = silence.start + padding_s
-            cut_end = silence.start + silence.duration - padding_s
-
-            if cut_start < cut_end and cut_start > cursor:
-                # Keep the part before this silence
-                if cursor < cut_start:
-                    kept_segments.append({"start": cursor, "end": cut_start})
-                cursor = cut_end
+        await manager.send_progress("silence_apply", 0.4, "Refining pause boundaries...")
+        profile = audio_service.build_waveform_profile(assembled_audio)
+        silence_candidates: list[dict] = []
+        quiet_candidates: list[dict] = []
+        for silence in selected_silences:
+            segment = {
+                "start": float(silence.start),
+                "end": float(silence.end),
+                "duration": float(silence.duration),
+                "selected": bool(silence.selected),
+                "kind": silence.kind,
+                "start_frame": silence.start_frame,
+                "end_frame": silence.end_frame,
+                "boundary_source": getattr(silence, "boundary_source", None),
+            }
+            if silence.kind == "low_prominence_speech":
+                quiet_candidates.append(segment)
             else:
-                # Silence too short after padding — skip it
-                continue
+                silence_candidates.append(segment)
 
-        # Keep the tail after the last silence
-        if cursor < total_duration:
-            kept_segments.append({"start": cursor, "end": total_duration})
+        refined_segments = audio_service.refine_silence_segments_to_waveform(
+            assembled_audio,
+            silence_candidates,
+            preserve_padding_ms=request.padding_ms,
+            profile=profile,
+        )
+        refined_quiet = audio_service.refine_segments_to_low_energy(
+            assembled_audio,
+            quiet_candidates,
+            max_shift_ms=40,
+            min_duration_ms=120,
+            profile=profile,
+        )
+        for segment in refined_quiet:
+            segment["boundary_source"] = "waveform"
+        refined_segments.extend(
+            trimmed
+            for trimmed in (_trim_segment_by_padding(segment, request.padding_ms) for segment in refined_quiet)
+            if trimmed is not None
+        )
+
+        cut_frame_ranges = []
+        for segment in refined_segments:
+            start_frame = int(assembled_tl_start) + int(round(float(segment["start"]) * assembled_fps))
+            end_frame = int(assembled_tl_start) + int(round(float(segment["end"]) * assembled_fps))
+            start_frame = max(tl_start, min(tl_end, start_frame))
+            end_frame = max(tl_start, min(tl_end, end_frame))
+
+            if end_frame > start_frame:
+                cut_frame_ranges.append((start_frame, end_frame))
+
+        if not cut_frame_ranges:
+            return {"error": "Selected pauses no longer have removable dead air after waveform refinement"}
+
+        cut_frame_ranges = _merge_frame_ranges(cut_frame_ranges)
+        kept_frame_ranges = _subtract_frame_ranges(tl_start, tl_end, cut_frame_ranges)
+        kept_segments = [
+            _frame_range_to_segment(start_frame, end_frame, tl_start, fps)
+            for start_frame, end_frame in kept_frame_ranges
+        ]
 
         if not kept_segments:
             return {"error": "Nothing left to keep after removing all silences"}
@@ -204,11 +392,11 @@ async def apply_silence_removal(request: SilenceApplyRequest):
         if not result["success"]:
             return {"error": result.get("error", "Failed to apply edits to current timeline")}
 
-        total_removed = sum(s.duration for s in selected_silences)
+        total_removed = sum((end_frame - start_frame) / fps for start_frame, end_frame in cut_frame_ranges)
 
         await manager.send_progress("silence_apply", 1.0, "Done")
         await manager.send_complete("silence_apply", {
-            "removed_count": len(selected_silences),
+            "removed_count": len(cut_frame_ranges),
             "total_removed": round(total_removed, 1),
             "backup_name": backup_name
         })
@@ -216,15 +404,15 @@ async def apply_silence_removal(request: SilenceApplyRequest):
         # Record in undo history
         from api.routes.undo import _record
         _record("Silence Removal", backup_name,
-                f"Removed {len(selected_silences)} silences ({total_removed:.1f}s)")
+                f"Removed {len(cut_frame_ranges)} silence sections ({total_removed:.1f}s)")
 
         return {
             "success": True,
-            "removed_count": len(selected_silences),
+            "removed_count": len(cut_frame_ranges),
             "total_removed_seconds": round(total_removed, 1),
             "backup_timeline": backup_name,
             "timeline_name": result.get("timeline_name"),
-            "message": f"Removed {len(selected_silences)} silences ({total_removed:.1f}s) on the current timeline. Backup: {backup_name}"
+            "message": f"Removed {len(cut_frame_ranges)} silence sections ({total_removed:.1f}s) on the current timeline. Backup: {backup_name}"
         }
     except Exception as e:
         await manager.send_error("silence_apply", str(e))

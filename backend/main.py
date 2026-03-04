@@ -1,6 +1,7 @@
 import os
 import sys
 import shutil
+import warnings
 
 # ── MUST run before any other imports ──────────────────────────────
 # Electron strips /opt/homebrew/bin from PATH. Fix it immediately so
@@ -11,6 +12,24 @@ for _p in _EXTRA_PATHS:
     if _p not in _current_path:
         _current_path = _p + ":" + _current_path
 os.environ["PATH"] = _current_path
+
+# pyannote emits a long torchcodec warning during import/load on this machine.
+# Finlay Cut uses preloaded waveforms, so this warning is noisy but non-blocking.
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    module=r"pyannote\.audio\.core\.io",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"(?s)\s*torchcodec is not installed correctly.*",
+    category=UserWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r".*Lightning automatically upgraded your loaded checkpoint.*",
+    category=UserWarning,
+)
 
 # ── Resolve absolute ffmpeg/ffprobe paths ONCE and patch pydub ─────
 # pydub.utils.get_encoder_name() returns bare "ffmpeg" (not the path)
@@ -64,6 +83,7 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+logging.getLogger("lightning.pytorch.utilities.migration.utils").setLevel(logging.WARNING)
 
 logger = logging.getLogger("finlaycut")
 
@@ -109,14 +129,20 @@ async def lifespan(app: FastAPI):
     # Start background polling for Resolve state changes
     poll_task = asyncio.create_task(resolve_service.poll_loop())
 
-    # Preload Whisper model in a background thread (non-blocking)
+    # Start global key-event monitor for Resolve transport detection
     loop = asyncio.get_running_loop()
+    from services import transport_monitor
+    transport_monitor.start(loop=loop)
+
+    # Preload Whisper model in a background thread (non-blocking)
     loop.run_in_executor(None, _preload_whisper)
 
     yield
 
     # Shutdown
     logger.info("FinlayCut backend shutting down")
+    from services import transport_monitor as _tm
+    _tm.stop()
     poll_task.cancel()
     try:
         await poll_task

@@ -19,7 +19,7 @@ export function getBaseUrl(): string {
 // Default timeout for normal requests; heavy ops get 5 hours
 const DEFAULT_TIMEOUT_MS = 30_000
 const HEAVY_TIMEOUT_MS = 18_000_000  // 5 hours
-const HEAVY_PATHS = ['/api/transcript-editor/transcribe', '/api/transcript-editor/apply', '/api/silence/analyze', '/api/filler-words/analyze', '/api/captions/generate', '/api/viral/detect', '/api/broll/suggest', '/api/scenes/detect', '/api/diarization/analyze', '/api/waveform/analyze']
+const HEAVY_PATHS = ['/api/transcript-editor/transcribe', '/api/transcript-editor/apply', '/api/transcript-editor/reconcile', '/api/silence/analyze', '/api/filler-words/analyze', '/api/captions/generate', '/api/viral/detect', '/api/broll/suggest', '/api/scenes/detect', '/api/diarization', '/api/waveform/analyze']
 
 function getTimeoutForPath(path: string): number {
   if (HEAVY_PATHS.some((p) => path.startsWith(p))) return HEAVY_TIMEOUT_MS

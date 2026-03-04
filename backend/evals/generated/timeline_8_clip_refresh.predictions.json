@@ -1,0 +1,2769 @@
+{
+  "metadata": {
+    "source_mode": "clip_at_playhead",
+    "file_path": "/Volumes/T7 Elijah/Video Projects 2025 -24/School Facilities/Pricipals/Sony Main/C3997.MP4",
+    "timeline_name": "Timeline 8",
+    "fps": 23.976,
+    "seconds": {
+      "clip_timeline_offset": 0.0,
+      "clip_duration_seconds": 90.42375709042376,
+      "source_start_seconds": 207.74941608274943,
+      "source_end_seconds": 298.2148815482149
+    },
+    "diarization_method": "local_fallback",
+    "diarization_fallback_reason": "Pyannote diarization model is gated and no Hugging Face token or local cache is available."
+  },
+  "filler_predictions": [
+    {
+      "start": 1.402,
+      "end": 1.494,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 5.962,
+      "end": 6.042,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 8.972,
+      "end": 9.172,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 10.442,
+      "end": 10.611,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 10.611,
+      "end": 11.473,
+      "kind": "filler"
+    },
+    {
+      "start": 11.493,
+      "end": 11.553,
+      "kind": "filler"
+    },
+    {
+      "start": 12.882,
+      "end": 13.012,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 14.562,
+      "end": 14.659,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 16.312,
+      "end": 16.522,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 16.522,
+      "end": 16.743,
+      "kind": "filler"
+    },
+    {
+      "start": 22.964,
+      "end": 23.124,
+      "kind": "filler"
+    },
+    {
+      "start": 24.062,
+      "end": 24.382,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 24.486,
+      "end": 24.526,
+      "kind": "filler"
+    },
+    {
+      "start": 26.232,
+      "end": 26.348,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 32.555,
+      "end": 32.615,
+      "kind": "filler"
+    },
+    {
+      "start": 32.962,
+      "end": 33.056,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 41.866,
+      "end": 41.966,
+      "kind": "filler"
+    },
+    {
+      "start": 44.222,
+      "end": 44.389,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 44.389,
+      "end": 44.449,
+      "kind": "filler"
+    },
+    {
+      "start": 47.522,
+      "end": 47.722,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 58.267,
+      "end": 58.567,
+      "kind": "filler"
+    },
+    {
+      "start": 59.952,
+      "end": 60.089,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 61.142,
+      "end": 61.25,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 62.702,
+      "end": 62.811,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 64.072,
+      "end": 64.373,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 64.373,
+      "end": 64.413,
+      "kind": "filler"
+    },
+    {
+      "start": 64.632,
+      "end": 64.753,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 64.952,
+      "end": 65.053,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 66.572,
+      "end": 66.775,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 66.775,
+      "end": 66.815,
+      "kind": "filler"
+    },
+    {
+      "start": 67.082,
+      "end": 67.176,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 69.052,
+      "end": 69.137,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 69.137,
+      "end": 69.177,
+      "kind": "filler"
+    },
+    {
+      "start": 69.762,
+      "end": 69.878,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 71.962,
+      "end": 72.1,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 72.582,
+      "end": 72.701,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 74.002,
+      "end": 74.142,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 74.362,
+      "end": 74.482,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 75.462,
+      "end": 75.584,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 75.584,
+      "end": 75.624,
+      "kind": "filler"
+    },
+    {
+      "start": 77.185,
+      "end": 77.485,
+      "kind": "filler"
+    },
+    {
+      "start": 78.392,
+      "end": 78.572,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 79.828,
+      "end": 80.388,
+      "kind": "filler"
+    },
+    {
+      "start": 83.922,
+      "end": 84.072,
+      "kind": "audio_hesitation"
+    },
+    {
+      "start": 86.174,
+      "end": 86.214,
+      "kind": "filler"
+    },
+    {
+      "start": 86.302,
+      "end": 86.674,
+      "kind": "audio_hesitation"
+    }
+  ],
+  "silence_predictions": [
+    {
+      "start": 2.432,
+      "end": 2.592,
+      "kind": "silence"
+    },
+    {
+      "start": 7.672,
+      "end": 7.832,
+      "kind": "silence"
+    },
+    {
+      "start": 10.092,
+      "end": 10.422,
+      "kind": "silence"
+    },
+    {
+      "start": 10.672,
+      "end": 10.982,
+      "kind": "silence"
+    },
+    {
+      "start": 11.792,
+      "end": 12.162,
+      "kind": "silence"
+    },
+    {
+      "start": 20.002,
+      "end": 20.742,
+      "kind": "silence"
+    },
+    {
+      "start": 32.342,
+      "end": 32.532,
+      "kind": "silence"
+    },
+    {
+      "start": 38.034,
+      "end": 38.18,
+      "kind": "silence"
+    },
+    {
+      "start": 41.322,
+      "end": 41.492,
+      "kind": "silence"
+    },
+    {
+      "start": 48.702,
+      "end": 49.672,
+      "kind": "silence"
+    },
+    {
+      "start": 75.192,
+      "end": 75.432,
+      "kind": "silence"
+    },
+    {
+      "start": 82.162,
+      "end": 82.622,
+      "kind": "silence"
+    },
+    {
+      "start": 88.322,
+      "end": 88.782,
+      "kind": "silence"
+    }
+  ],
+  "speaker_segments": [
+    {
+      "speaker": "SPEAKER_02",
+      "start": 0.484,
+      "end": 1.924,
+      "duration": 1.44,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 2.824,
+      "end": 2.984,
+      "duration": 0.16,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 5.824,
+      "end": 6.024,
+      "duration": 0.2,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 6.744,
+      "end": 7.504,
+      "duration": 0.76,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 8.484,
+      "end": 9.844,
+      "duration": 1.36,
+      "speaker_index": 1
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 10.524,
+      "end": 10.684,
+      "duration": 0.16,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 11.304,
+      "end": 11.564,
+      "duration": 0.26,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 12.424,
+      "end": 13.064,
+      "duration": 0.64,
+      "speaker_index": 1
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 13.484,
+      "end": 14.764,
+      "duration": 1.28,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 15.264,
+      "end": 15.964,
+      "duration": 0.7,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 16.364,
+      "end": 17.084,
+      "duration": 0.72,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 17.684,
+      "end": 18.104,
+      "duration": 0.42,
+      "speaker_index": 1
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 18.504,
+      "end": 18.784,
+      "duration": 0.28,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 23.084,
+      "end": 26.504,
+      "duration": 3.42,
+      "speaker_index": 1
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 28.104,
+      "end": 28.404,
+      "duration": 0.3,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 28.884,
+      "end": 29.564,
+      "duration": 0.68,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 29.924,
+      "end": 31.204,
+      "duration": 1.28,
+      "speaker_index": 1
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 31.744,
+      "end": 32.064,
+      "duration": 0.32,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 32.604,
+      "end": 34.044,
+      "duration": 1.44,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 34.444,
+      "end": 35.464,
+      "duration": 1.02,
+      "speaker_index": 1
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 35.844,
+      "end": 38.004,
+      "duration": 2.16,
+      "speaker_index": 1
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 38.824,
+      "end": 40.124,
+      "duration": 1.3,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 40.564,
+      "end": 41.344,
+      "duration": 0.78,
+      "speaker_index": 1
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 41.944,
+      "end": 42.804,
+      "duration": 0.86,
+      "speaker_index": 1
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 43.384,
+      "end": 43.584,
+      "duration": 0.2,
+      "speaker_index": 1
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 44.244,
+      "end": 44.484,
+      "duration": 0.24,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 44.824,
+      "end": 46.944,
+      "duration": 2.12,
+      "speaker_index": 1
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 47.324,
+      "end": 48.244,
+      "duration": 0.92,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 58.424,
+      "end": 61.504,
+      "duration": 3.08,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 61.884,
+      "end": 62.884,
+      "duration": 1.0,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 63.564,
+      "end": 63.724,
+      "duration": 0.16,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 64.184,
+      "end": 65.204,
+      "duration": 1.02,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 65.844,
+      "end": 66.024,
+      "duration": 0.18,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 66.644,
+      "end": 67.204,
+      "duration": 0.56,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 67.584,
+      "end": 68.344,
+      "duration": 0.76,
+      "speaker_index": 1
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 69.804,
+      "end": 72.844,
+      "duration": 3.04,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 73.204,
+      "end": 73.604,
+      "duration": 0.4,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 74.164,
+      "end": 74.924,
+      "duration": 0.76,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 75.524,
+      "end": 76.644,
+      "duration": 1.12,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 77.044,
+      "end": 77.684,
+      "duration": 0.64,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 78.424,
+      "end": 79.264,
+      "duration": 0.84,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 79.684,
+      "end": 79.904,
+      "duration": 0.22,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 80.304,
+      "end": 81.964,
+      "duration": 1.66,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 82.844,
+      "end": 83.124,
+      "duration": 0.28,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 83.484,
+      "end": 85.044,
+      "duration": 1.56,
+      "speaker_index": 0
+    },
+    {
+      "speaker": "SPEAKER_02",
+      "start": 85.564,
+      "end": 86.644,
+      "duration": 1.08,
+      "speaker_index": 0
+    }
+  ],
+  "annotated_words": [
+    {
+      "word": "Hi,",
+      "start": 0.031,
+      "end": 0.632,
+      "probability": 0.896,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "my",
+      "start": 0.993,
+      "end": 1.133,
+      "probability": 0.988,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "name",
+      "start": 1.193,
+      "end": 1.394,
+      "probability": 0.785,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "is",
+      "start": 1.494,
+      "end": 1.574,
+      "probability": 0.798,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "Daniel",
+      "start": 1.634,
+      "end": 1.935,
+      "probability": 0.843,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "Indicat.",
+      "start": 1.995,
+      "end": 2.395,
+      "probability": 0.906,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "I'm",
+      "start": 2.776,
+      "end": 2.876,
+      "probability": 0.983,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "the",
+      "start": 2.896,
+      "end": 2.977,
+      "probability": 0.832,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "principal",
+      "start": 3.017,
+      "end": 3.317,
+      "probability": 0.861,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "of",
+      "start": 3.357,
+      "end": 3.397,
+      "probability": 0.975,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "Sunny",
+      "start": 3.437,
+      "end": 3.618,
+      "probability": 0.858,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "Slope",
+      "start": 3.638,
+      "end": 3.838,
+      "probability": 0.863,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "Elementary.",
+      "start": 3.878,
+      "end": 4.339,
+      "probability": 0.864,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "It's",
+      "start": 4.459,
+      "end": 4.58,
+      "probability": 0.754,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "a",
+      "start": 4.64,
+      "end": 4.66,
+      "probability": 0.779,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "great",
+      "start": 4.74,
+      "end": 4.94,
+      "probability": 0.872,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "little",
+      "start": 4.98,
+      "end": 5.161,
+      "probability": 0.933,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "community",
+      "start": 5.181,
+      "end": 5.602,
+      "probability": 0.885,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "school",
+      "start": 5.642,
+      "end": 5.962,
+      "probability": 0.681,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "that's",
+      "start": 6.403,
+      "end": 6.603,
+      "probability": 0.793,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "down",
+      "start": 6.684,
+      "end": 6.884,
+      "probability": 0.91,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "in",
+      "start": 6.964,
+      "end": 7.044,
+      "probability": 0.901,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "the",
+      "start": 7.084,
+      "end": 7.145,
+      "probability": 0.985,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "Green",
+      "start": 7.185,
+      "end": 7.365,
+      "probability": 0.72,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "neighborhood.",
+      "start": 7.405,
+      "end": 8.247,
+      "probability": 0.814,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "We",
+      "start": 8.267,
+      "end": 8.367,
+      "probability": 0.972,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "serve",
+      "start": 8.407,
+      "end": 8.607,
+      "probability": 0.886,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "about",
+      "start": 8.647,
+      "end": 8.808,
+      "probability": 0.879,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "260",
+      "start": 8.828,
+      "end": 8.968,
+      "probability": 0.774,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "students.",
+      "start": 9.249,
+      "end": 9.99,
+      "probability": 0.668,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "Um,",
+      "start": 10.611,
+      "end": 11.473,
+      "probability": 0.854,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "uh,",
+      "start": 11.493,
+      "end": 11.553,
+      "probability": 0.467,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "we",
+      "start": 12.254,
+      "end": 12.354,
+      "probability": 0.793,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "serve",
+      "start": 12.395,
+      "end": 12.575,
+      "probability": 0.928,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "about",
+      "start": 12.595,
+      "end": 12.755,
+      "probability": 0.712,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "260",
+      "start": 12.775,
+      "end": 12.875,
+      "probability": 0.699,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "students.",
+      "start": 13.096,
+      "end": 13.717,
+      "probability": 0.774,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "It's",
+      "start": 13.817,
+      "end": 13.917,
+      "probability": 0.75,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "in",
+      "start": 13.978,
+      "end": 14.038,
+      "probability": 0.953,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "the",
+      "start": 14.078,
+      "end": 14.138,
+      "probability": 0.664,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "heart",
+      "start": 14.258,
+      "end": 14.499,
+      "probability": 0.843,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "of",
+      "start": 14.659,
+      "end": 14.739,
+      "probability": 0.952,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "the",
+      "start": 14.759,
+      "end": 14.859,
+      "probability": 0.769,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "housing",
+      "start": 14.919,
+      "end": 15.18,
+      "probability": 0.945,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "project",
+      "start": 15.22,
+      "end": 15.5,
+      "probability": 0.913,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "down",
+      "start": 15.54,
+      "end": 15.701,
+      "probability": 0.954,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "there.",
+      "start": 15.721,
+      "end": 15.881,
+      "probability": 0.887,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "Uh,",
+      "start": 16.522,
+      "end": 16.743,
+      "probability": 0.608,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "and",
+      "start": 16.763,
+      "end": 16.863,
+      "probability": 0.664,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "it's",
+      "start": 17.023,
+      "end": 17.144,
+      "probability": 0.859,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "a",
+      "start": 17.204,
+      "end": 17.224,
+      "probability": 0.997,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "campus",
+      "start": 17.264,
+      "end": 17.624,
+      "probability": 0.818,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "that",
+      "start": 17.665,
+      "end": 17.825,
+      "probability": 0.926,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "has",
+      "start": 17.885,
+      "end": 18.105,
+      "probability": 0.964,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "a",
+      "start": 18.506,
+      "end": 18.526,
+      "probability": 0.807,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "lot",
+      "start": 18.586,
+      "end": 18.707,
+      "probability": 0.843,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "of",
+      "start": 18.747,
+      "end": 18.787,
+      "probability": 0.954,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "great",
+      "start": 18.807,
+      "end": 18.967,
+      "probability": 0.884,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "features.",
+      "start": 19.007,
+      "end": 19.508,
+      "probability": 0.897,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "Uh,",
+      "start": 22.964,
+      "end": 23.124,
+      "probability": 0.91,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "sunny",
+      "start": 23.164,
+      "end": 23.364,
+      "probability": 0.903,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "slope",
+      "start": 23.384,
+      "end": 23.565,
+      "probability": 0.905,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "was",
+      "start": 23.605,
+      "end": 23.705,
+      "probability": 0.826,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "built",
+      "start": 23.765,
+      "end": 23.985,
+      "probability": 0.745,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "uh",
+      "start": 24.486,
+      "end": 24.526,
+      "probability": 0.0,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "as",
+      "start": 24.546,
+      "end": 24.626,
+      "probability": 0.916,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "a",
+      "start": 24.686,
+      "end": 24.706,
+      "probability": 0.993,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "two-room",
+      "start": 24.766,
+      "end": 25.127,
+      "probability": 0.761,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "classroom",
+      "start": 25.147,
+      "end": 25.507,
+      "probability": 0.748,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "at",
+      "start": 25.527,
+      "end": 25.567,
+      "probability": 0.51,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "first",
+      "start": 25.627,
+      "end": 25.867,
+      "probability": 0.661,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "in",
+      "start": 25.907,
+      "end": 26.068,
+      "probability": 0.288,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "the",
+      "start": 26.108,
+      "end": 26.228,
+      "probability": 0.955,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "mid",
+      "start": 26.348,
+      "end": 26.508,
+      "probability": 0.953,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "60s",
+      "start": 26.548,
+      "end": 26.869,
+      "probability": 0.559,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "around",
+      "start": 26.929,
+      "end": 27.109,
+      "probability": 0.844,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "1965.",
+      "start": 27.129,
+      "end": 28.31,
+      "probability": 0.905,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "There",
+      "start": 28.33,
+      "end": 28.991,
+      "probability": 0.891,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "it",
+      "start": 29.011,
+      "end": 29.151,
+      "probability": 0.725,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "developed",
+      "start": 29.211,
+      "end": 29.572,
+      "probability": 0.823,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "had",
+      "start": 29.612,
+      "end": 29.792,
+      "probability": 0.812,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "two",
+      "start": 29.872,
+      "end": 29.992,
+      "probability": 0.997,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "more",
+      "start": 30.032,
+      "end": 30.172,
+      "probability": 0.966,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "classrooms",
+      "start": 30.212,
+      "end": 30.633,
+      "probability": 0.787,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "built",
+      "start": 30.673,
+      "end": 30.853,
+      "probability": 0.733,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "at",
+      "start": 30.893,
+      "end": 30.933,
+      "probability": 0.951,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "some",
+      "start": 30.953,
+      "end": 31.174,
+      "probability": 0.664,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "time",
+      "start": 31.214,
+      "end": 31.414,
+      "probability": 0.847,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "after",
+      "start": 31.574,
+      "end": 31.774,
+      "probability": 0.889,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "that.",
+      "start": 31.814,
+      "end": 32.015,
+      "probability": 0.937,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "Uh,",
+      "start": 32.555,
+      "end": 32.615,
+      "probability": 0.06,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "there",
+      "start": 32.635,
+      "end": 32.755,
+      "probability": 0.882,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "was",
+      "start": 32.795,
+      "end": 32.876,
+      "probability": 0.857,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "a",
+      "start": 32.936,
+      "end": 32.956,
+      "probability": 0.997,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "major",
+      "start": 33.056,
+      "end": 33.396,
+      "probability": 0.883,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "bond",
+      "start": 33.436,
+      "end": 33.677,
+      "probability": 0.957,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "project",
+      "start": 33.717,
+      "end": 34.037,
+      "probability": 0.769,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "that",
+      "start": 34.057,
+      "end": 34.177,
+      "probability": 0.782,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "happened",
+      "start": 34.217,
+      "end": 34.518,
+      "probability": 0.88,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "in",
+      "start": 34.578,
+      "end": 34.618,
+      "probability": 0.952,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "the",
+      "start": 34.658,
+      "end": 34.718,
+      "probability": 0.372,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "late",
+      "start": 34.738,
+      "end": 34.898,
+      "probability": 0.925,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "70s",
+      "start": 34.918,
+      "end": 35.379,
+      "probability": 0.788,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "where",
+      "start": 35.759,
+      "end": 35.919,
+      "probability": 0.87,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "sunny",
+      "start": 35.959,
+      "end": 36.24,
+      "probability": 0.802,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "slope",
+      "start": 36.26,
+      "end": 36.46,
+      "probability": 0.873,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "was",
+      "start": 36.52,
+      "end": 36.64,
+      "probability": 0.778,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "completed",
+      "start": 36.72,
+      "end": 37.121,
+      "probability": 0.995,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "to",
+      "start": 37.161,
+      "end": 37.241,
+      "probability": 0.991,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "its",
+      "start": 37.281,
+      "end": 37.361,
+      "probability": 0.621,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "present",
+      "start": 37.441,
+      "end": 37.701,
+      "probability": 0.901,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "format,",
+      "start": 37.761,
+      "end": 38.462,
+      "probability": 0.851,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "which",
+      "start": 38.482,
+      "end": 38.602,
+      "probability": 0.957,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "includes",
+      "start": 38.682,
+      "end": 38.983,
+      "probability": 0.832,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "the",
+      "start": 39.023,
+      "end": 39.083,
+      "probability": 0.845,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "cafeteria,",
+      "start": 39.103,
+      "end": 39.724,
+      "probability": 0.912,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "a",
+      "start": 39.784,
+      "end": 39.824,
+      "probability": 0.709,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "gym",
+      "start": 39.884,
+      "end": 40.144,
+      "probability": 0.905,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "and",
+      "start": 40.484,
+      "end": 40.545,
+      "probability": 0.854,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "the",
+      "start": 40.585,
+      "end": 40.645,
+      "probability": 0.989,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "rest",
+      "start": 40.665,
+      "end": 40.825,
+      "probability": 0.785,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "of",
+      "start": 40.865,
+      "end": 40.905,
+      "probability": 0.97,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "the",
+      "start": 40.945,
+      "end": 41.025,
+      "probability": 0.829,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "classrooms.",
+      "start": 41.045,
+      "end": 41.846,
+      "probability": 0.85,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "So",
+      "start": 41.866,
+      "end": 41.966,
+      "probability": 0.988,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "it's",
+      "start": 42.006,
+      "end": 42.106,
+      "probability": 0.86,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "been",
+      "start": 42.126,
+      "end": 42.247,
+      "probability": 0.973,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "a",
+      "start": 42.287,
+      "end": 42.307,
+      "probability": 0.991,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "great",
+      "start": 42.347,
+      "end": 42.507,
+      "probability": 0.995,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "place.",
+      "start": 42.547,
+      "end": 42.847,
+      "probability": 0.946,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "Been",
+      "start": 43.148,
+      "end": 43.308,
+      "probability": 0.824,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "serving",
+      "start": 43.328,
+      "end": 43.588,
+      "probability": 0.914,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "schools,",
+      "start": 43.608,
+      "end": 43.949,
+      "probability": 0.775,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "uh,",
+      "start": 44.389,
+      "end": 44.449,
+      "probability": 0.578,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "been",
+      "start": 44.609,
+      "end": 44.749,
+      "probability": 0.618,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "serving",
+      "start": 44.77,
+      "end": 45.09,
+      "probability": 0.696,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "serving",
+      "start": 45.13,
+      "end": 45.39,
+      "probability": 0.865,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "our",
+      "start": 45.43,
+      "end": 45.49,
+      "probability": 0.217,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "students",
+      "start": 45.51,
+      "end": 45.811,
+      "probability": 0.835,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "for",
+      "start": 45.851,
+      "end": 46.011,
+      "probability": 0.848,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "in",
+      "start": 46.331,
+      "end": 46.411,
+      "probability": 0.963,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "this",
+      "start": 46.451,
+      "end": 46.572,
+      "probability": 0.854,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "capacity",
+      "start": 46.632,
+      "end": 47.112,
+      "probability": 0.906,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "45",
+      "start": 47.132,
+      "end": 47.453,
+      "probability": 0.784,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "years,",
+      "start": 48.013,
+      "end": 48.294,
+      "probability": 0.867,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "I",
+      "start": 48.334,
+      "end": 48.374,
+      "probability": 0.862,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "think.",
+      "start": 48.394,
+      "end": 48.634,
+      "probability": 0.944,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "Can",
+      "start": 51.044,
+      "end": 51.286,
+      "probability": 0.603,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "you",
+      "start": 51.326,
+      "end": 51.427,
+      "probability": 0.624,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "talk",
+      "start": 51.447,
+      "end": 51.628,
+      "probability": 0.849,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "a",
+      "start": 51.668,
+      "end": 51.689,
+      "probability": 0.657,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "little",
+      "start": 51.709,
+      "end": 51.87,
+      "probability": 0.615,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "bit",
+      "start": 51.91,
+      "end": 51.971,
+      "probability": 0.24,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "about",
+      "start": 51.991,
+      "end": 52.273,
+      "probability": 0.496,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "what",
+      "start": 52.313,
+      "end": 52.434,
+      "probability": 0.166,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "are",
+      "start": 52.454,
+      "end": 52.514,
+      "probability": 0.867,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "some",
+      "start": 52.535,
+      "end": 52.635,
+      "probability": 0.864,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "of",
+      "start": 52.756,
+      "end": 52.796,
+      "probability": 0.002,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "the",
+      "start": 52.817,
+      "end": 52.897,
+      "probability": 0.157,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "updates",
+      "start": 52.917,
+      "end": 53.159,
+      "probability": 0.402,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "the",
+      "start": 53.34,
+      "end": 53.421,
+      "probability": 0.933,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "district",
+      "start": 53.461,
+      "end": 53.763,
+      "probability": 0.842,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "has",
+      "start": 53.824,
+      "end": 53.924,
+      "probability": 0.614,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "made",
+      "start": 53.965,
+      "end": 54.106,
+      "probability": 0.955,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "over",
+      "start": 54.146,
+      "end": 54.267,
+      "probability": 0.986,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "the",
+      "start": 54.307,
+      "end": 54.388,
+      "probability": 0.789,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "recent",
+      "start": 54.629,
+      "end": 54.992,
+      "probability": 0.906,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "years?",
+      "start": 55.032,
+      "end": 55.435,
+      "probability": 0.878,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "So",
+      "start": 58.267,
+      "end": 58.567,
+      "probability": 0.831,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "I",
+      "start": 58.727,
+      "end": 58.767,
+      "probability": 0.888,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "know",
+      "start": 58.848,
+      "end": 59.008,
+      "probability": 0.61,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "the",
+      "start": 59.068,
+      "end": 59.148,
+      "probability": 0.824,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "district",
+      "start": 59.188,
+      "end": 59.468,
+      "probability": 0.843,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "has",
+      "start": 59.508,
+      "end": 59.608,
+      "probability": 0.853,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "made",
+      "start": 59.648,
+      "end": 59.849,
+      "probability": 0.797,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "a",
+      "start": 59.869,
+      "end": 59.889,
+      "probability": 1.0,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "lot",
+      "start": 60.089,
+      "end": 60.269,
+      "probability": 0.886,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "of",
+      "start": 60.309,
+      "end": 60.349,
+      "probability": 0.999,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "improvements",
+      "start": 60.429,
+      "end": 60.99,
+      "probability": 0.84,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "and",
+      "start": 61.25,
+      "end": 61.33,
+      "probability": 0.965,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "invested",
+      "start": 61.37,
+      "end": 61.83,
+      "probability": 0.916,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "a",
+      "start": 61.85,
+      "end": 61.87,
+      "probability": 0.869,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "lot",
+      "start": 61.93,
+      "end": 62.071,
+      "probability": 0.972,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "of",
+      "start": 62.111,
+      "end": 62.151,
+      "probability": 0.935,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "funds",
+      "start": 62.231,
+      "end": 62.531,
+      "probability": 0.86,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "in",
+      "start": 62.811,
+      "end": 62.911,
+      "probability": 0.855,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "our",
+      "start": 62.951,
+      "end": 63.232,
+      "probability": 0.828,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "fencing",
+      "start": 63.292,
+      "end": 63.652,
+      "probability": 0.826,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "um",
+      "start": 64.373,
+      "end": 64.413,
+      "probability": 0.426,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "in",
+      "start": 64.753,
+      "end": 64.873,
+      "probability": 0.752,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "our",
+      "start": 65.053,
+      "end": 65.154,
+      "probability": 0.839,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "safety",
+      "start": 65.254,
+      "end": 65.514,
+      "probability": 0.902,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "and",
+      "start": 65.534,
+      "end": 65.614,
+      "probability": 0.868,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "security",
+      "start": 65.634,
+      "end": 66.094,
+      "probability": 0.948,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "uh",
+      "start": 66.775,
+      "end": 66.815,
+      "probability": 0.273,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "and",
+      "start": 66.975,
+      "end": 67.075,
+      "probability": 0.687,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "in",
+      "start": 67.176,
+      "end": 67.276,
+      "probability": 0.859,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "some",
+      "start": 67.316,
+      "end": 67.456,
+      "probability": 0.903,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "lighting",
+      "start": 67.496,
+      "end": 67.756,
+      "probability": 0.864,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "projects",
+      "start": 67.796,
+      "end": 68.116,
+      "probability": 0.813,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "that",
+      "start": 68.136,
+      "end": 68.237,
+      "probability": 0.604,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "have",
+      "start": 68.277,
+      "end": 68.357,
+      "probability": 0.915,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "happened",
+      "start": 68.377,
+      "end": 68.697,
+      "probability": 0.869,
+      "speaker": "SPEAKER_01",
+      "speaker_index": 1
+    },
+    {
+      "word": "uh",
+      "start": 69.137,
+      "end": 69.177,
+      "probability": 0.218,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "we",
+      "start": 69.197,
+      "end": 69.278,
+      "probability": 0.994,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "have",
+      "start": 69.318,
+      "end": 69.458,
+      "probability": 0.887,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "some",
+      "start": 69.498,
+      "end": 69.638,
+      "probability": 0.933,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "led",
+      "start": 69.878,
+      "end": 70.138,
+      "probability": 0.733,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "lights",
+      "start": 70.198,
+      "end": 70.459,
+      "probability": 0.876,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "in",
+      "start": 70.699,
+      "end": 70.799,
+      "probability": 0.873,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "the",
+      "start": 70.879,
+      "end": 70.939,
+      "probability": 0.675,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "main",
+      "start": 71.019,
+      "end": 71.299,
+      "probability": 0.85,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "areas",
+      "start": 71.42,
+      "end": 71.7,
+      "probability": 0.899,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "of",
+      "start": 71.76,
+      "end": 71.8,
+      "probability": 0.826,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "the",
+      "start": 71.86,
+      "end": 71.96,
+      "probability": 0.941,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "of",
+      "start": 72.1,
+      "end": 72.16,
+      "probability": 0.948,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "the",
+      "start": 72.2,
+      "end": 72.26,
+      "probability": 0.981,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "school",
+      "start": 72.3,
+      "end": 72.581,
+      "probability": 0.774,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "in",
+      "start": 72.701,
+      "end": 72.761,
+      "probability": 0.992,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "the",
+      "start": 72.781,
+      "end": 72.841,
+      "probability": 0.895,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "cafeteria",
+      "start": 72.881,
+      "end": 73.441,
+      "probability": 0.85,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "in",
+      "start": 73.502,
+      "end": 73.582,
+      "probability": 0.941,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "the",
+      "start": 73.602,
+      "end": 73.662,
+      "probability": 0.913,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "gym",
+      "start": 73.722,
+      "end": 74.002,
+      "probability": 0.931,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "in",
+      "start": 74.142,
+      "end": 74.242,
+      "probability": 0.98,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "the",
+      "start": 74.282,
+      "end": 74.362,
+      "probability": 0.79,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "library",
+      "start": 74.482,
+      "end": 74.903,
+      "probability": 0.849,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "uh",
+      "start": 75.584,
+      "end": 75.624,
+      "probability": 0.027,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "we",
+      "start": 75.644,
+      "end": 75.724,
+      "probability": 0.944,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "have",
+      "start": 75.744,
+      "end": 75.864,
+      "probability": 0.884,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "a",
+      "start": 75.904,
+      "end": 75.924,
+      "probability": 0.107,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "vestibule",
+      "start": 75.984,
+      "end": 76.344,
+      "probability": 0.807,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "now",
+      "start": 76.384,
+      "end": 76.584,
+      "probability": 0.943,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "that",
+      "start": 76.985,
+      "end": 77.145,
+      "probability": 0.934,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "really",
+      "start": 77.185,
+      "end": 77.485,
+      "probability": 0.668,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "makes",
+      "start": 77.545,
+      "end": 77.746,
+      "probability": 0.761,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "our",
+      "start": 77.866,
+      "end": 77.946,
+      "probability": 0.626,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "students",
+      "start": 77.986,
+      "end": 78.246,
+      "probability": 0.863,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "safer",
+      "start": 78.767,
+      "end": 79.067,
+      "probability": 0.746,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "and",
+      "start": 79.147,
+      "end": 79.207,
+      "probability": 0.998,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "more",
+      "start": 79.267,
+      "end": 79.407,
+      "probability": 0.865,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "secure",
+      "start": 79.447,
+      "end": 79.788,
+      "probability": 0.646,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "uh",
+      "start": 79.828,
+      "end": 80.388,
+      "probability": 0.63,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "that",
+      "start": 80.408,
+      "end": 80.508,
+      "probability": 0.936,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "was",
+      "start": 80.528,
+      "end": 80.608,
+      "probability": 0.81,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "completed",
+      "start": 80.668,
+      "end": 81.069,
+      "probability": 0.88,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "in",
+      "start": 81.109,
+      "end": 81.149,
+      "probability": 0.84,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "the",
+      "start": 81.189,
+      "end": 81.269,
+      "probability": 0.735,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "last",
+      "start": 81.289,
+      "end": 81.489,
+      "probability": 0.853,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "two",
+      "start": 81.549,
+      "end": 81.669,
+      "probability": 0.974,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "years",
+      "start": 81.709,
+      "end": 81.97,
+      "probability": 0.703,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "and",
+      "start": 82.83,
+      "end": 82.911,
+      "probability": 0.902,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "then",
+      "start": 82.931,
+      "end": 83.071,
+      "probability": 0.952,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "we",
+      "start": 83.411,
+      "end": 83.491,
+      "probability": 0.912,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "do",
+      "start": 83.531,
+      "end": 83.631,
+      "probability": 0.754,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "have",
+      "start": 83.691,
+      "end": 83.831,
+      "probability": 0.868,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "a",
+      "start": 84.072,
+      "end": 84.112,
+      "probability": 0.985,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "perimeter",
+      "start": 84.192,
+      "end": 84.572,
+      "probability": 0.855,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "fencing",
+      "start": 84.612,
+      "end": 85.013,
+      "probability": 0.844,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "that",
+      "start": 85.373,
+      "end": 85.473,
+      "probability": 0.968,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "goes",
+      "start": 85.533,
+      "end": 85.733,
+      "probability": 0.712,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "around",
+      "start": 85.813,
+      "end": 86.154,
+      "probability": 0.885,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "uh",
+      "start": 86.174,
+      "end": 86.214,
+      "probability": 0.5,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "the",
+      "start": 86.674,
+      "end": 86.754,
+      "probability": 0.75,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "school",
+      "start": 86.794,
+      "end": 87.014,
+      "probability": 0.824,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    },
+    {
+      "word": "buildings",
+      "start": 87.034,
+      "end": 87.615,
+      "probability": 0.795,
+      "speaker": "SPEAKER_02",
+      "speaker_index": 0
+    }
+  ]
+}

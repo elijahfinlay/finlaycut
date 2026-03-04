@@ -3,6 +3,7 @@ import { toast } from 'sonner'
 import { Button } from '../common/Button'
 import { ConfirmApply } from '../common/TimelineGuard'
 import { Card } from '../common/Card'
+import { Modal } from '../common/Modal'
 import { ProgressBar } from '../layout/ProgressBar'
 import { apiFetch } from '../../hooks/useApi'
 import { useProgress } from '../../hooks/useWebSocket'
@@ -13,8 +14,18 @@ interface FillerDetection {
   word: string
   start: number
   end: number
+  start_frame?: number
+  end_frame?: number
+  source_start_frame?: number
+  source_end_frame?: number
+  kind?: string
+  boundary_source?: string
   context: string
   selected: boolean
+}
+
+function isAnalysisMarker(word: { word: string; kind?: string }): boolean {
+  return word.word === '[silence]' || word.word === '[filler]' || word.kind === 'silence' || word.kind === 'audio_hesitation'
 }
 
 const OP_NAME = 'filler_words'
@@ -32,6 +43,9 @@ export function FillerWordRemoval() {
   const [detections, setDetections] = useState<FillerDetection[]>(storedDetections)
   const [applying, setApplying] = useState(false)
   const [result, setResult] = useState<any>(null)
+  const [undoEntryId, setUndoEntryId] = useState<string | null>(null)
+  const [showUndoConfirm, setShowUndoConfirm] = useState(false)
+  const [undoing, setUndoing] = useState(false)
   const { progress, message, elapsed, eta } = useProgress(OP_NAME)
   const abortRef = useRef<AbortController | null>(null)
 
@@ -67,10 +81,14 @@ export function FillerWordRemoval() {
       const body: any = {}
       if (hasTranscript) {
         body.transcript = {
-          words: transcriptWords.map((w) => ({
+          words: transcriptWords.filter((w) => !isAnalysisMarker(w)).map((w) => ({
             word: w.word,
             start: w.start,
             end: w.end,
+            start_frame: w.start_frame,
+            end_frame: w.end_frame,
+            source_start_frame: w.source_start_frame,
+            source_end_frame: w.source_end_frame,
           })),
         }
       }
@@ -113,21 +131,50 @@ export function FillerWordRemoval() {
     }
   }
 
+  const prevDetectionsRef = useRef<FillerDetection[]>([])
+
   const handleApply = async () => {
     setApplying(true)
+    prevDetectionsRef.current = detections
     try {
       const data = await apiFetch('/api/filler-words/apply', {
         method: 'POST',
         body: JSON.stringify(detections.filter((d) => d.selected))
       })
       setResult(data)
-      if (data.success) toast.success(data.message || 'Filler words removed successfully')
-      else if (data.error) toast.error(data.error)
+      if (data.success) {
+        toast.success(data.message || 'Filler words removed successfully')
+        setUndoEntryId(data.undo_entry_id || null)
+        setDetections([])
+      } else if (data.error) {
+        toast.error(data.error)
+      }
     } catch (err: any) {
       setResult({ error: err.message })
       toast.error(err.message)
     } finally {
       setApplying(false)
+    }
+  }
+
+  const handleUndo = async () => {
+    if (!undoEntryId) return
+    setUndoing(true)
+    try {
+      const data = await apiFetch(`/api/undo/rollback/${undoEntryId}`, { method: 'POST' })
+      if (data.success) {
+        toast.success(data.message || 'Rolled back successfully')
+        setResult(null)
+        setUndoEntryId(null)
+        setDetections(prevDetectionsRef.current)
+      } else if (data.error) {
+        toast.error(data.error)
+      }
+    } catch (err: any) {
+      toast.error(err.message)
+    } finally {
+      setUndoing(false)
+      setShowUndoConfirm(false)
     }
   }
 
@@ -227,7 +274,7 @@ export function FillerWordRemoval() {
                     <span
                       className={`font-semibold ${det.selected ? 'text-resolve-warning' : 'text-resolve-textMuted'}`}
                     >
-                      "{det.word}"
+                      {det.kind === 'audio_hesitation' ? '[filler]' : `"${det.word}"`}
                     </span>
                     <span className="font-mono text-xs text-resolve-textMuted">
                       {formatTime(det.start)}
@@ -254,9 +301,35 @@ export function FillerWordRemoval() {
       )}
       {result?.success && (
         <Card className="border-resolve-success/30">
-          <p className="text-sm text-resolve-success">{result.message}</p>
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-resolve-success">{result.message}</p>
+            {undoEntryId && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowUndoConfirm(true)}
+                disabled={undoing}
+              >
+                Undo
+              </Button>
+            )}
+          </div>
         </Card>
       )}
+
+      <Modal open={showUndoConfirm} onClose={() => setShowUndoConfirm(false)} title="Undo Filler Removal">
+        <p className="text-sm text-resolve-textDim mb-4">
+          This will roll back to the backup timeline created before the filler words were removed. Continue?
+        </p>
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" size="sm" onClick={() => setShowUndoConfirm(false)}>
+            Cancel
+          </Button>
+          <Button size="sm" onClick={handleUndo} disabled={undoing}>
+            {undoing ? 'Rolling back...' : 'Confirm Undo'}
+          </Button>
+        </div>
+      </Modal>
     </div>
   )
 }

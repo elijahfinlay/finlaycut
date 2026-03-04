@@ -19,6 +19,7 @@ from api.routes import (
     export,
     scenes,
     diarization,
+    evals,
 )
 
 api_router = APIRouter()
@@ -42,3 +43,4 @@ api_router.include_router(waveform.router, prefix="/waveform", tags=["waveform"]
 api_router.include_router(export.router, prefix="/export", tags=["export"])
 api_router.include_router(scenes.router, prefix="/scenes", tags=["scenes"])
 api_router.include_router(diarization.router, prefix="/diarization", tags=["diarization"])
+api_router.include_router(evals.router, prefix="/evals", tags=["evals"])

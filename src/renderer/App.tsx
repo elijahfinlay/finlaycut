@@ -103,9 +103,9 @@ export default function App() {
   return (
     <div className="h-screen flex flex-col bg-resolve-bg">
       <Header />
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 min-h-0 overflow-hidden">
         <Sidebar />
-        <main className="flex-1 overflow-y-auto">
+        <main className="min-w-0 flex-1 overflow-y-auto">
           <ActiveFeatureComponent />
         </main>
       </div>

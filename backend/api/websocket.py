@@ -61,6 +61,14 @@ class ConnectionManager:
             **status
         })
 
+    async def send_timeline_changed(self, new_signature: str, timeline_name: str):
+        """Notify all clients that the timeline signature has changed."""
+        await self.broadcast({
+            "type": "timeline_changed",
+            "timeline_signature": new_signature,
+            "timeline_name": timeline_name,
+        })
+
 
 manager = ConnectionManager()
 
@@ -70,8 +78,18 @@ async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            # Keep connection alive, handle any incoming messages
-            data = await websocket.receive_text()
-            # Could handle client-side messages here if needed
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            if msg.get("type") == "watch_signature":
+                # Frontend tells us which signature to watch for changes
+                from services.resolve_service import resolve_service
+                resolve_service.set_watched_signature(
+                    msg.get("signature"),
+                    msg.get("timeline_name"),
+                )
     except WebSocketDisconnect:
         manager.disconnect(websocket)

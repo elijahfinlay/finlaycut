@@ -27,7 +27,7 @@ export function Header() {
       style={{ WebkitAppRegion: 'drag' } as any}
     >
       {/* Top row: connection + project */}
-      <div className="h-10 flex items-center px-5 gap-3">
+      <div className="min-h-10 flex flex-wrap items-center px-5 py-2 gap-3">
         {/* macOS traffic light spacer */}
         <div className="w-16 flex-shrink-0" />
 
@@ -74,7 +74,7 @@ export function Header() {
       {connected ? (
         <div className="px-5 pb-3 pt-0.5">
           <div className={clsx(
-            'flex items-center gap-3 px-4 py-2.5 rounded-lg',
+            'flex flex-wrap items-center gap-3 px-4 py-2.5 rounded-lg',
             timelineName
               ? 'bg-resolve-accent/8 border border-resolve-accent/20'
               : 'bg-resolve-warning/8 border border-resolve-warning/20'
@@ -91,7 +91,7 @@ export function Header() {
             </svg>
 
             {timelineName ? (
-              <div className="flex items-center gap-3 flex-1 min-w-0">
+              <div className="flex flex-1 flex-wrap items-center gap-3 min-w-0">
                 <div className="flex items-center gap-2 min-w-0">
                   <span className="text-xs text-resolve-textMuted font-medium uppercase tracking-wide">Timeline:</span>
                   <span className="text-sm font-semibold text-resolve-text truncate">
@@ -100,7 +100,7 @@ export function Header() {
                 </div>
 
                 {/* Meta chips */}
-                <div className="flex items-center gap-2 ml-auto flex-shrink-0">
+                <div className="flex flex-wrap items-center gap-2 xl:ml-auto">
                   {resolution && (
                     <span className="px-2 py-0.5 text-[11px] font-mono text-resolve-textMuted bg-resolve-bg/60 rounded">
                       {resolution}

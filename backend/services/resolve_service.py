@@ -4,6 +4,8 @@ Maintains persistent connection and provides high-level operations.
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
 from typing import Optional
@@ -20,6 +22,11 @@ class ResolveService:
         self._connected = False
         self._last_connect_attempt = 0
         self._reconnect_interval = 2.0  # seconds
+        # Signature watching (set via WebSocket from frontend)
+        self._watched_signature: str | None = None
+        self._watched_timeline_name: str | None = None
+        self._last_timeline_signature: str | None = None
+        self._signature_poll_counter: int = 0
 
     def _debug_enabled(self) -> bool:
         return bool(getattr(settings, "debug_cut_planning", False))
@@ -83,8 +90,43 @@ class ResolveService:
             self._connected = False
             return {"connected": False, "project": None, "timeline": None}
 
+    def set_watched_signature(self, signature: str | None, timeline_name: str | None = None):
+        """Store the signature the frontend wants us to watch for changes."""
+        if signature is not None and signature == self._watched_signature:
+            return  # already watching this exact signature — avoid resetting counter
+        self._watched_signature = signature
+        self._watched_timeline_name = timeline_name
+        self._last_timeline_signature = signature  # baseline
+        self._signature_poll_counter = 0
+        if signature:
+            logger.info("Now watching timeline signature for '%s'", timeline_name or "unknown")
+        else:
+            logger.info("Stopped watching timeline signature")
+
+    async def _check_timeline_signature(self, ws_manager):
+        """Compare current timeline signature to watched value; broadcast if changed."""
+        if not self._watched_signature or not self.connected:
+            return
+        try:
+            sig_data = self.get_timeline_signature()
+            if sig_data is None:
+                return
+            current = sig_data["timeline_signature"]
+            if current == self._last_timeline_signature:
+                return
+            # Signature changed
+            self._last_timeline_signature = current
+            await ws_manager.send_timeline_changed(
+                current,
+                sig_data.get("timeline_name", self._watched_timeline_name or ""),
+            )
+        except Exception as e:
+            logger.debug("Signature check error: %s", e)
+
     async def poll_loop(self):
         """Background loop that checks Resolve connection status."""
+        from api.websocket import manager as ws_manager
+
         while True:
             try:
                 if not self.connected:
@@ -95,6 +137,13 @@ class ResolveService:
                     if not status["connected"]:
                         logger.warning("Lost connection, will retry...")
                         self.try_connect()
+
+                    # Check timeline signature every 2nd cycle (~4s)
+                    if self._watched_signature:
+                        self._signature_poll_counter += 1
+                        if self._signature_poll_counter >= 2:
+                            self._signature_poll_counter = 0
+                            await self._check_timeline_signature(ws_manager)
 
                 await asyncio.sleep(self._reconnect_interval)
             except asyncio.CancelledError:
@@ -418,13 +467,13 @@ class ResolveService:
             # Move to in-point and set mark
             self.set_playhead_frame(in_frame)
             subprocess.run(["osascript", "-e",
-                'tell application "System Events" to tell process "DaVinci Resolve" to key code 34'
+                'tell application "System Events" to tell process "Resolve" to key code 34'
             ], capture_output=True, timeout=2)
 
             # Move to out-point and set mark
             self.set_playhead_frame(out_frame)
             subprocess.run(["osascript", "-e",
-                'tell application "System Events" to tell process "DaVinci Resolve" to key code 31'
+                'tell application "System Events" to tell process "Resolve" to key code 31'
             ], capture_output=True, timeout=2)
 
             # Restore playhead
@@ -446,7 +495,7 @@ class ResolveService:
         try:
             # Option+X clears in/out marks in Resolve
             subprocess.run(["osascript", "-e",
-                'tell application "System Events" to tell process "DaVinci Resolve" to key code 7 using option down'
+                'tell application "System Events" to tell process "Resolve" to key code 7 using option down'
             ], capture_output=True, timeout=2)
             return True
         except Exception as e:
@@ -471,7 +520,7 @@ class ResolveService:
 
             # Cmd+A = Select All
             subprocess.run(["osascript", "-e",
-                'tell application "System Events" to tell process "DaVinci Resolve" '
+                'tell application "System Events" to tell process "Resolve" '
                 'to key code 0 using {command down}'  # key code 0 = A
             ], capture_output=True, timeout=2)
             _time.sleep(0.15)
@@ -479,14 +528,14 @@ class ResolveService:
             # Cmd+G = Close Gap (DaVinci Resolve shortcut: Timeline > Close Gap)
             # Note: This may not work if no gaps exist; that's fine.
             subprocess.run(["osascript", "-e",
-                'tell application "System Events" to tell process "DaVinci Resolve" '
+                'tell application "System Events" to tell process "Resolve" '
                 'to key code 5 using {command down}'  # key code 5 = G
             ], capture_output=True, timeout=2)
             _time.sleep(0.15)
 
             # Click somewhere neutral to deselect (Cmd+Shift+A = Deselect All)
             subprocess.run(["osascript", "-e",
-                'tell application "System Events" to tell process "DaVinci Resolve" '
+                'tell application "System Events" to tell process "Resolve" '
                 'to key code 0 using {command down, shift down}'  # Cmd+Shift+A
             ], capture_output=True, timeout=2)
 
@@ -514,21 +563,21 @@ class ResolveService:
 
             # Cmd+A = Select All
             subprocess.run(["osascript", "-e",
-                'tell application "System Events" to tell process "DaVinci Resolve" '
+                'tell application "System Events" to tell process "Resolve" '
                 'to key code 0 using {command down}'  # key code 0 = A
             ], capture_output=True, timeout=2)
             _time.sleep(0.15)
 
             # Option+Cmd+L = Link Clips
             subprocess.run(["osascript", "-e",
-                'tell application "System Events" to tell process "DaVinci Resolve" '
+                'tell application "System Events" to tell process "Resolve" '
                 'to key code 37 using {command down, option down}'  # key code 37 = L
             ], capture_output=True, timeout=2)
             _time.sleep(0.15)
 
             # Deselect all (Cmd+Shift+A)
             subprocess.run(["osascript", "-e",
-                'tell application "System Events" to tell process "DaVinci Resolve" '
+                'tell application "System Events" to tell process "Resolve" '
                 'to key code 0 using {command down, shift down}'
             ], capture_output=True, timeout=2)
 
@@ -592,7 +641,7 @@ class ResolveService:
             self.set_playhead_frame(end_frame)
             _time.sleep(0.05)
             subprocess.run(["osascript", "-e",
-                'tell application "System Events" to tell process "DaVinci Resolve" '
+                'tell application "System Events" to tell process "Resolve" '
                 'to key code 11 using {command down}'  # Cmd+B = Blade
             ], capture_output=True, timeout=2)
             _time.sleep(0.05)
@@ -601,7 +650,7 @@ class ResolveService:
             self.set_playhead_frame(start_frame)
             _time.sleep(0.05)
             subprocess.run(["osascript", "-e",
-                'tell application "System Events" to tell process "DaVinci Resolve" '
+                'tell application "System Events" to tell process "Resolve" '
                 'to key code 11 using {command down}'  # Cmd+B = Blade
             ], capture_output=True, timeout=2)
             _time.sleep(0.1)  # Extra wait for Resolve to process the splits
@@ -725,6 +774,67 @@ class ResolveService:
             return props.get("File Path", None)
         except Exception:
             return None
+
+    def get_clip_audio_context(self, timeline_item) -> dict | None:
+        """
+        Return a normalized timing/source context for a timeline item.
+        This is the canonical mapping between timeline time and source media time.
+        """
+        if timeline_item is None:
+            return None
+
+        timeline = self.get_current_timeline()
+        if timeline is None:
+            return None
+
+        file_path = self.get_clip_file_path(timeline_item)
+        if not file_path:
+            return None
+
+        try:
+            clip_start_frame = int(timeline_item.GetStart())
+            clip_end_frame = int(timeline_item.GetEnd())
+        except Exception:
+            return None
+
+        if clip_end_frame <= clip_start_frame:
+            return None
+
+        info = self._timeline_rate_info(timeline)
+        fps = float(info["fps"])
+        timeline_start_frame = int(info["start_frame"])
+        source_range = self.get_timeline_item_source_range(timeline_item)
+
+        context = {
+            "file_path": file_path,
+            "fps": fps,
+            "timeline_start_frame": timeline_start_frame,
+            "clip_start_frame": clip_start_frame,
+            "clip_end_frame": clip_end_frame,
+            "clip_duration_frames": int(clip_end_frame - clip_start_frame),
+            "clip_duration_seconds": (clip_end_frame - clip_start_frame) / fps,
+            "clip_timeline_offset": (clip_start_frame - timeline_start_frame) / fps,
+            "clip_item_id": self.get_timeline_item_unique_id(timeline_item),
+        }
+
+        if source_range is not None:
+            context.update({
+                "source_start_frame": int(source_range["source_start_frame"]),
+                "source_end_frame": int(source_range["source_end_frame"]),
+                "source_start_seconds": int(source_range["source_start_frame"]) / fps,
+                "source_end_seconds": int(source_range["source_end_frame"]) / fps,
+                "source_strategy": source_range.get("strategy"),
+            })
+        else:
+            context.update({
+                "source_start_frame": None,
+                "source_end_frame": None,
+                "source_start_seconds": None,
+                "source_end_seconds": None,
+                "source_strategy": None,
+            })
+
+        return context
 
     def _call_timeline_item_int_method(self, timeline_item, method_name: str) -> int | None:
         method = getattr(timeline_item, method_name, None)
@@ -912,6 +1022,441 @@ class ResolveService:
         matches.sort(key=lambda m: (0 if m["media_type"] == "audio" else 1, m["track_index"]))
         return matches[0]
 
+    def _get_timeline_item_records(
+        self,
+        media_types: tuple[str, ...] = ("audio", "video"),
+    ) -> list[dict]:
+        """Collect normalized timeline item metadata for signature and transcript sync."""
+        timeline = self.get_current_timeline()
+        if timeline is None:
+            return []
+
+        records: list[dict] = []
+        for media_type in media_types:
+            track_count = timeline.GetTrackCount(media_type) or 0
+            for track_idx in range(1, track_count + 1):
+                items = timeline.GetItemListInTrack(media_type, track_idx) or []
+                for item in items:
+                    try:
+                        clip_start_frame = int(item.GetStart())
+                        clip_end_frame = int(item.GetEnd())
+                    except Exception:
+                        continue
+
+                    if clip_end_frame <= clip_start_frame:
+                        continue
+
+                    source_range = self.get_timeline_item_source_range(item)
+                    record = {
+                        "item": item,
+                        "media_type": media_type,
+                        "track_index": int(track_idx),
+                        "timeline_item_unique_id": self.get_timeline_item_unique_id(item),
+                        "file_path": self.get_clip_file_path(item),
+                        "clip_start_frame": int(clip_start_frame),
+                        "clip_end_frame": int(clip_end_frame),
+                        "source_start_frame": None,
+                        "source_end_frame": None,
+                    }
+                    if source_range is not None:
+                        record["source_start_frame"] = int(source_range["source_start_frame"])
+                        record["source_end_frame"] = int(source_range["source_end_frame"])
+
+                    records.append(record)
+
+        return records
+
+    def _timeline_record_is_retimed(self, record: dict) -> bool:
+        """Best-effort retime detection: source span should match clip span for transcript-safe sync."""
+        source_start_frame = record.get("source_start_frame")
+        source_end_frame = record.get("source_end_frame")
+        if source_start_frame is None or source_end_frame is None:
+            return False
+
+        try:
+            source_span = int(source_end_frame) - int(source_start_frame)
+            clip_span = int(record["clip_end_frame"]) - int(record["clip_start_frame"])
+        except Exception:
+            return False
+
+        return source_span > 0 and clip_span > 0 and source_span != clip_span
+
+    def _timeline_record_priority(self, record: dict) -> tuple[int, int, int]:
+        media_type = str(record.get("media_type") or "")
+        media_rank = 0 if media_type == "audio" else 1 if media_type == "video" else 2
+        has_source_range = 0 if record.get("source_start_frame") is not None and record.get("source_end_frame") is not None else 1
+        return (
+            media_rank,
+            has_source_range,
+            int(record.get("track_index") or 0),
+        )
+
+    def _timeline_record_equivalence_key(self, record: dict) -> tuple:
+        return (
+            str(record.get("timeline_item_unique_id") or ""),
+            str(record.get("file_path") or ""),
+            int(record.get("clip_start_frame") or 0),
+            int(record.get("clip_end_frame") or 0),
+            int(record["source_start_frame"]) if record.get("source_start_frame") is not None else None,
+            int(record["source_end_frame"]) if record.get("source_end_frame") is not None else None,
+        )
+
+    def _dedupe_timeline_record_candidates(self, records: list[dict]) -> list[dict]:
+        canonical: dict[tuple, dict] = {}
+        for record in records:
+            key = self._timeline_record_equivalence_key(record)
+            current = canonical.get(key)
+            if current is None or self._timeline_record_priority(record) < self._timeline_record_priority(current):
+                canonical[key] = record
+        return list(canonical.values())
+
+    def _resolve_word_frames_for_record(
+        self,
+        record: dict,
+        source_start_frame: int | None,
+        source_end_frame: int | None,
+        cached_start_frame: int | None,
+        cached_end_frame: int | None,
+        original_clip_start_frame: int | None,
+    ) -> tuple[int, int] | None:
+        try:
+            record_clip_start = int(record["clip_start_frame"])
+            record_clip_end = int(record["clip_end_frame"])
+        except Exception:
+            return None
+
+        record_source_start = record.get("source_start_frame")
+        record_source_end = record.get("source_end_frame")
+
+        if (
+            source_start_frame is not None
+            and source_end_frame is not None
+            and record_source_start is not None
+            and record_source_end is not None
+        ):
+            resolved_start_frame = record_clip_start + (int(source_start_frame) - int(record_source_start))
+            resolved_end_frame = record_clip_start + (int(source_end_frame) - int(record_source_start))
+        else:
+            if cached_start_frame is None or original_clip_start_frame is None:
+                return None
+            resolved_start_frame = record_clip_start + (int(cached_start_frame) - int(original_clip_start_frame))
+            cached_end_value = int(cached_end_frame if cached_end_frame is not None else cached_start_frame)
+            resolved_end_frame = resolved_start_frame + max(0, cached_end_value - int(cached_start_frame))
+
+        if resolved_end_frame <= resolved_start_frame:
+            return None
+        if resolved_start_frame < record_clip_start or resolved_end_frame > record_clip_end:
+            return None
+
+        return int(resolved_start_frame), int(resolved_end_frame)
+
+    def _select_transcript_sync_candidate(
+        self,
+        candidates: list[dict],
+        source_start_frame: int | None,
+        source_end_frame: int | None,
+        cached_start_frame: int | None,
+        cached_end_frame: int | None,
+        original_clip_start_frame: int | None,
+        previous_start_frame: int | None,
+    ) -> dict | None:
+        deduped_candidates = self._dedupe_timeline_record_candidates(candidates)
+        viable_candidates = [
+            record for record in deduped_candidates
+            if not self._timeline_record_is_retimed(record)
+        ] or deduped_candidates
+
+        matches: list[dict] = []
+        for record in viable_candidates:
+            resolved_frames = self._resolve_word_frames_for_record(
+                record,
+                source_start_frame,
+                source_end_frame,
+                cached_start_frame,
+                cached_end_frame,
+                original_clip_start_frame,
+            )
+            if resolved_frames is None:
+                continue
+
+            resolved_start_frame, resolved_end_frame = resolved_frames
+            if previous_start_frame is not None and resolved_start_frame + 1 < previous_start_frame:
+                continue
+
+            timeline_distance = (
+                abs(resolved_start_frame - int(cached_start_frame))
+                if cached_start_frame is not None
+                else 0
+            )
+            clip_distance = (
+                abs(int(record["clip_start_frame"]) - int(original_clip_start_frame))
+                if original_clip_start_frame is not None
+                else 0
+            )
+            matches.append({
+                "record": record,
+                "resolved_start_frame": resolved_start_frame,
+                "resolved_end_frame": resolved_end_frame,
+                "sort_key": (
+                    int(timeline_distance),
+                    int(clip_distance),
+                    self._timeline_record_priority(record),
+                    int(resolved_start_frame),
+                ),
+            })
+
+        if not matches:
+            return None
+
+        matches.sort(key=lambda match: match["sort_key"])
+        if len(matches) > 1 and matches[0]["sort_key"] == matches[1]["sort_key"]:
+            return None
+        return matches[0]
+
+    def get_timeline_signature(self) -> dict | None:
+        """Return a deterministic fingerprint for the current timeline contents."""
+        timeline = self.get_current_timeline()
+        if timeline is None:
+            return None
+
+        try:
+            timeline_name = timeline.GetName()
+            timeline_start_frame = int(timeline.GetStartFrame())
+            timeline_end_frame = int(timeline.GetEndFrame())
+            video_tracks = int(timeline.GetTrackCount("video") or 0)
+            audio_tracks = int(timeline.GetTrackCount("audio") or 0)
+        except Exception as e:
+            logger.error("Failed to read timeline signature metadata: %s", e)
+            return None
+
+        records = self._get_timeline_item_records()
+        signature_items = [
+            {
+                "media_type": record["media_type"],
+                "track_index": int(record["track_index"]),
+                "timeline_item_unique_id": record.get("timeline_item_unique_id"),
+                "file_path": record.get("file_path"),
+                "clip_start_frame": int(record["clip_start_frame"]),
+                "clip_end_frame": int(record["clip_end_frame"]),
+                "source_start_frame": record.get("source_start_frame"),
+                "source_end_frame": record.get("source_end_frame"),
+            }
+            for record in records
+        ]
+        signature_items.sort(
+            key=lambda item: (
+                item["media_type"],
+                int(item["track_index"]),
+                int(item["clip_start_frame"]),
+                int(item["clip_end_frame"]),
+                str(item.get("file_path") or ""),
+                str(item.get("timeline_item_unique_id") or ""),
+            )
+        )
+
+        payload = {
+            "timeline_name": timeline_name,
+            "timeline_start_frame": timeline_start_frame,
+            "timeline_end_frame": timeline_end_frame,
+            "video_track_count": video_tracks,
+            "audio_track_count": audio_tracks,
+            "items": signature_items,
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+        return {
+            "timeline_name": timeline_name,
+            "timeline_signature": digest,
+            "start_frame": timeline_start_frame,
+            "end_frame": timeline_end_frame,
+            "video_tracks": video_tracks,
+            "audio_tracks": audio_tracks,
+            "item_count": len(signature_items),
+        }
+
+    def resolve_transcript_words_on_current_timeline(self, words: list[dict], context: dict | None = None) -> dict:
+        """
+        Re-anchor transcript words onto the current timeline using unique IDs and source ranges.
+        This is intentionally strict: unsafe or ambiguous matches require a re-transcribe.
+        """
+        timeline = self.get_current_timeline()
+        if timeline is None:
+            return {
+                "success": False,
+                "reason": "content_changed",
+                "error": "No active timeline",
+                "coverage_ratio": 0.0,
+                "confidence": 0.0,
+            }
+
+        context = context or {}
+        info = self._timeline_rate_info(timeline)
+        fps = float(info["fps"])
+        timeline_start_frame = int(info["start_frame"])
+        records = self._get_timeline_item_records()
+        if not records:
+            return {
+                "success": False,
+                "reason": "content_changed",
+                "error": "No timeline items found on the current timeline",
+                "coverage_ratio": 0.0,
+                "confidence": 0.0,
+            }
+
+        unique_index: dict[str, list[dict]] = {}
+        file_index: dict[str, list[dict]] = {}
+        for record in records:
+            unique_id = record.get("timeline_item_unique_id")
+            if unique_id:
+                unique_index.setdefault(str(unique_id), []).append(record)
+            file_path = record.get("file_path")
+            if file_path:
+                file_index.setdefault(str(file_path), []).append(record)
+
+        total_duration = 0.0
+        matched_duration = 0.0
+        resolved_words: list[dict] = []
+        previous_start_frame: int | None = None
+        unique_clip_ids: set[str] = set()
+        unique_file_paths: set[str] = set()
+
+        def _failure(reason: str, error: str) -> dict:
+            coverage_ratio = matched_duration / total_duration if total_duration > 0 else 0.0
+            return {
+                "success": False,
+                "reason": reason,
+                "error": error,
+                "coverage_ratio": round(coverage_ratio, 4),
+                "confidence": round(max(0.0, coverage_ratio - 0.05), 4),
+                "matched_words": len(resolved_words),
+                "total_words": len(words),
+            }
+
+        for word in words:
+            duration = max(0.0, float(word.get("end", 0.0)) - float(word.get("start", 0.0)))
+            total_duration += duration
+
+            clip_item_id = word.get("clip_item_id") or context.get("clip_item_id")
+            file_path = word.get("file_path") or context.get("file_path")
+            source_start_frame = word.get("source_start_frame")
+            source_end_frame = word.get("source_end_frame")
+            cached_start_frame = word.get("start_frame")
+            cached_end_frame = word.get("end_frame", cached_start_frame)
+            original_clip_start_frame = context.get("clip_start_frame")
+
+            candidates: list[dict] = []
+            if clip_item_id:
+                candidates = list(unique_index.get(str(clip_item_id), []))
+
+            if not candidates and file_path and source_start_frame is not None:
+                for record in file_index.get(str(file_path), []):
+                    record_source_start = record.get("source_start_frame")
+                    record_source_end = record.get("source_end_frame")
+                    if record_source_start is None or record_source_end is None:
+                        continue
+                    if not (int(record_source_start) <= int(source_start_frame) < int(record_source_end)):
+                        continue
+                    if source_end_frame is not None and int(source_end_frame) > int(record_source_end):
+                        continue
+                    candidates.append(record)
+
+            if not candidates:
+                return _failure(
+                    "content_changed",
+                    "The current timeline no longer contains the clip content needed for this transcript.",
+                )
+
+            candidate_match = self._select_transcript_sync_candidate(
+                candidates,
+                int(source_start_frame) if source_start_frame is not None else None,
+                int(source_end_frame) if source_end_frame is not None else None,
+                int(cached_start_frame) if cached_start_frame is not None else None,
+                int(cached_end_frame) if cached_end_frame is not None else None,
+                int(original_clip_start_frame) if original_clip_start_frame is not None else None,
+                previous_start_frame,
+            )
+            if candidate_match is None:
+                return _failure(
+                    "ambiguous_sync",
+                    "The current timeline has multiple possible matches for part of this transcript.",
+                )
+
+            record = candidate_match["record"]
+            if self._timeline_record_is_retimed(record):
+                return _failure(
+                    "content_changed",
+                    "The current timeline appears to have retimed clips, so this transcript must be re-transcribed.",
+                )
+
+            record_clip_start = int(record["clip_start_frame"])
+            record_clip_end = int(record["clip_end_frame"])
+            resolved_start_frame = int(candidate_match["resolved_start_frame"])
+            resolved_end_frame = int(candidate_match["resolved_end_frame"])
+
+            if resolved_end_frame <= resolved_start_frame:
+                return _failure(
+                    "content_changed",
+                    "The current timeline trimmed through transcript-covered words and can no longer be synced safely.",
+                )
+
+            if resolved_start_frame < record_clip_start or resolved_end_frame > record_clip_end:
+                return _failure(
+                    "content_changed",
+                    "The current timeline trimmed through transcript-covered words and requires a fresh transcription.",
+                )
+
+            if previous_start_frame is not None and resolved_start_frame + 1 < previous_start_frame:
+                return _failure(
+                    "ambiguous_sync",
+                    "The synced transcript would no longer preserve word order on the current timeline.",
+                )
+            previous_start_frame = resolved_start_frame
+
+            unique_id = record.get("timeline_item_unique_id")
+            if unique_id:
+                unique_clip_ids.add(str(unique_id))
+            if record.get("file_path"):
+                unique_file_paths.add(str(record["file_path"]))
+
+            next_word = dict(word)
+            next_word.update({
+                "start_frame": int(resolved_start_frame),
+                "end_frame": int(resolved_end_frame),
+                "start": round((int(resolved_start_frame) - timeline_start_frame) / fps, 4),
+                "end": round((int(resolved_end_frame) - timeline_start_frame) / fps, 4),
+                "clip_item_id": unique_id,
+                "file_path": record.get("file_path"),
+            })
+            resolved_words.append(next_word)
+            matched_duration += duration
+
+        coverage_ratio = matched_duration / total_duration if total_duration > 0 else 1.0
+        if coverage_ratio < 0.98:
+            return _failure(
+                "content_changed",
+                "Too much transcript coverage was lost while syncing to the current timeline.",
+            )
+
+        resolved_context = {
+            "clip_item_id": next(iter(unique_clip_ids)) if len(unique_clip_ids) == 1 else None,
+            "file_path": next(iter(unique_file_paths)) if len(unique_file_paths) == 1 else None,
+            "clip_start_frame": timeline_start_frame,
+            "clip_end_frame": int(timeline.GetEndFrame()),
+            "source_start_frame": None,
+            "source_end_frame": None,
+        }
+
+        return {
+            "success": True,
+            "words": resolved_words,
+            "transcript_context": resolved_context,
+            "coverage_ratio": round(coverage_ratio, 4),
+            "confidence": round(min(1.0, coverage_ratio), 4),
+            "matched_words": len(resolved_words),
+            "total_words": len(words),
+        }
+
     def resolve_transcript_word_timeline_frame(self, word: dict, context: dict | None = None) -> dict:
         """
         Resolve a transcript word back to the current timeline position, even if its clip moved.
@@ -924,8 +1469,8 @@ class ResolveService:
         cached_start_frame = word.get("start_frame")
         cached_end_frame = word.get("end_frame")
         original_clip_start_frame = context.get("clip_start_frame")
-        file_path = context.get("file_path")
-        clip_item_id = context.get("clip_item_id")
+        file_path = word.get("file_path") or context.get("file_path")
+        clip_item_id = word.get("clip_item_id") or context.get("clip_item_id")
 
         match = None
         strategy = None

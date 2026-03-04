@@ -1,0 +1,52 @@
+{
+  "id": "example_interview_fixture",
+  "enabled": false,
+  "audio_path": "/absolute/path/to/interview.wav",
+  "fps": 23.976,
+  "language": "en",
+  "notes": "Template fixture. Copy this file, set enabled=true, and replace with real labels.",
+  "filler": {
+    "enabled": true,
+    "match_tolerance_ms": 140,
+    "minimum_f1": 0.9,
+    "expected": [
+      {
+        "start": 1.42,
+        "end": 1.63,
+        "label": "filler"
+      }
+    ]
+  },
+  "silence": {
+    "enabled": true,
+    "threshold_db": -40,
+    "min_duration_ms": 300,
+    "min_duration_frames": 14,
+    "match_tolerance_ms": 160,
+    "minimum_f1": 0.85,
+    "expected": [
+      {
+        "start": 4.08,
+        "end": 4.74,
+        "kind": "silence"
+      }
+    ]
+  },
+  "speakers": {
+    "enabled": true,
+    "num_speakers": 2,
+    "minimum_accuracy": 0.9,
+    "expected_segments": [
+      {
+        "start": 0.0,
+        "end": 14.2,
+        "speaker": "guest"
+      },
+      {
+        "start": 14.2,
+        "end": 16.8,
+        "speaker": "interviewer"
+      }
+    ]
+  }
+}

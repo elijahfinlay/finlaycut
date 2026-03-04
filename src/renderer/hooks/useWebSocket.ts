@@ -3,12 +3,14 @@ import { getBaseUrl } from './useApi'
 import { useOperationStore } from '../stores/operationStore'
 
 export interface WSMessage {
-  type: 'progress' | 'complete' | 'error' | 'resolve_status'
+  type: 'progress' | 'complete' | 'error' | 'resolve_status' | 'timeline_changed'
   operation?: string
   progress?: number
   message?: string
   result?: any
   error?: string
+  timeline_signature?: string
+  timeline_name?: string
 }
 
 // ---- Singleton WebSocket manager ----
@@ -22,6 +24,7 @@ let ws: WebSocket | null = null
 let wsConnected = false
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectDelay = 1000
+let pendingMessage: Record<string, unknown> | null = null
 
 function connectWs() {
   try {
@@ -31,6 +34,10 @@ function connectWs() {
     ws.onopen = () => {
       wsConnected = true
       reconnectDelay = 1000 // reset on successful connect
+      if (pendingMessage) {
+        ws!.send(JSON.stringify(pendingMessage))
+        pendingMessage = null
+      }
     }
 
     ws.onmessage = (event) => {
@@ -79,10 +86,18 @@ function connectWs() {
 // Start the singleton connection once
 connectWs()
 
-function subscribe(fn: Listener) {
+export function subscribe(fn: Listener) {
   listeners.add(fn)
   return () => {
     listeners.delete(fn)
+  }
+}
+
+export function sendWsMessage(msg: Record<string, unknown>) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(msg))
+  } else {
+    pendingMessage = msg
   }
 }
 

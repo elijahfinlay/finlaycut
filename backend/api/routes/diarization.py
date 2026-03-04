@@ -2,15 +2,22 @@
 
 import logging
 from fastapi import APIRouter, Query
+from pydantic import BaseModel
 from typing import Optional
 from services.resolve_service import resolve_service
 from services.diarization_service import diarization_service
-from utils.audio_utils import extract_audio
+from utils.audio_utils import extract_audio, extract_audio_segment, assemble_timeline_audio
 from utils.operation_queue import heavy_operation
+from utils.speaker_analysis import build_speaker_summaries, compute_speaker_loudness
 from api.websocket import manager
 
 logger = logging.getLogger("finlaycut.diarization_route")
 router = APIRouter()
+
+
+class TranscriptSpeakerRequest(BaseModel):
+    words: list[dict]
+    num_speakers: Optional[int] = None
 
 
 @router.post("/analyze")
@@ -42,7 +49,7 @@ async def analyze_speakers(
         async def progress_fn(pct, msg):
             await manager.send_progress("diarization", pct, msg)
 
-        segments = await diarization_service.diarize_with_progress(
+        segments, method, fallback_reason = await diarization_service.diarize_with_progress(
             audio_path,
             num_speakers=num_speakers,
             progress_fn=progress_fn,
@@ -55,6 +62,112 @@ async def analyze_speakers(
             "speakers": speakers,
             "speaker_count": len(speakers),
             "segment_count": len(segments),
+            "method": method,
+            "fallback_reason": fallback_reason,
+        }
+    except ImportError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        await manager.send_error("diarization", str(e))
+        return {"error": str(e)}
+
+
+@router.post("/annotate-transcript")
+@heavy_operation("Speaker Diarization")
+async def annotate_transcript_speakers(request: TranscriptSpeakerRequest):
+    """
+    Diarize the current timeline audio and assign speaker labels to transcript words.
+    Returns annotated words plus per-speaker duration/loudness summaries so the UI
+    can offer "keep this speaker / cut that speaker" controls.
+    """
+    if not resolve_service.connected:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    if not request.words:
+        return {"error": "No transcript words provided"}
+
+    timeline = resolve_service.get_current_timeline()
+    if timeline is None:
+        return {"error": "No active timeline"}
+
+    clips = resolve_service.get_timeline_clips("audio", 1)
+    if not clips:
+        clips = resolve_service.get_timeline_clips("video", 1)
+    if not clips:
+        return {"error": "No clips found in timeline"}
+
+    fps_str = timeline.GetSetting("timelineFrameRate")
+    fps = float(fps_str) if fps_str else 24.0
+    timeline_start_frame = int(timeline.GetStartFrame())
+    timeline_end_frame = int(timeline.GetEndFrame())
+    timeline_duration_seconds = (timeline_end_frame - timeline_start_frame) / fps
+
+    try:
+        await manager.send_progress("diarization", 0.04, "Extracting timeline audio...")
+
+        audio_cache: dict[str, str] = {}
+        clip_segments: list[dict] = []
+
+        for index, clip in enumerate(clips):
+            file_path = resolve_service.get_clip_file_path(clip)
+            if not file_path:
+                continue
+
+            clip_context = resolve_service.get_clip_audio_context(clip)
+            if clip_context is None:
+                continue
+
+            if file_path not in audio_cache:
+                audio_cache[file_path] = extract_audio(file_path)
+            full_audio = audio_cache[file_path]
+
+            audio_path = full_audio
+            if clip_context.get("source_start_seconds") is not None and clip_context.get("source_end_seconds") is not None:
+                try:
+                    audio_path = extract_audio_segment(
+                        full_audio,
+                        float(clip_context["source_start_seconds"]),
+                        float(clip_context["source_end_seconds"]),
+                    )
+                except Exception as e:
+                    logger.warning("Speaker segment extraction failed for clip %d (%s)", index, e)
+
+            clip_segments.append({
+                "audio_path": audio_path,
+                "timeline_start_seconds": float(clip_context["clip_timeline_offset"]),
+                "duration_seconds": float(clip_context["clip_duration_seconds"]),
+            })
+
+        if not clip_segments:
+            return {"error": "Could not extract timeline audio for speaker analysis"}
+
+        assembled_audio = assemble_timeline_audio(clip_segments, timeline_duration_seconds)
+
+        async def progress_fn(pct, msg):
+            scaled = 0.10 + pct * 0.78
+            await manager.send_progress("diarization", scaled, msg)
+
+        diarization_segments, method, fallback_reason = await diarization_service.diarize_with_progress(
+            assembled_audio,
+            num_speakers=request.num_speakers,
+            progress_fn=progress_fn,
+        )
+
+        words = diarization_service.assign_speakers_to_words(
+            [dict(word) for word in request.words],
+            diarization_segments,
+        )
+        loudness = compute_speaker_loudness(assembled_audio, diarization_segments)
+        speakers = build_speaker_summaries(diarization_segments, words, loudness)
+
+        await manager.send_progress("diarization", 1.0, f"Found {len(speakers)} speaker profiles")
+        return {
+            "words": words,
+            "segments": diarization_segments,
+            "speakers": speakers,
+            "speaker_count": len(speakers),
+            "method": method,
+            "fallback_reason": fallback_reason,
         }
     except ImportError as e:
         return {"error": str(e)}

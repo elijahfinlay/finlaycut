@@ -38,6 +38,15 @@ async def get_timeline_info():
     return {"timeline": info}
 
 
+@router.get("/timeline-signature")
+async def get_timeline_signature():
+    """Get a deterministic signature for the current timeline contents."""
+    info = resolve_service.get_timeline_signature()
+    if info is None:
+        return {"error": "No timeline available", "success": False}
+    return {"success": True, **info}
+
+
 @router.get("/timelines")
 async def get_all_timelines():
     """Get list of all timelines in the current project."""
@@ -128,6 +137,22 @@ async def cancel_operation():
     return result
 
 
+@router.get("/transport-state")
+async def get_transport_state():
+    """Get Resolve's play/pause state via the global key-event monitor.
+
+    Resolve's GetCurrentTimecode() is completely stale during playback on
+    macOS, so we can't detect play/pause via timecode polling.  Instead, a
+    background Quartz event tap watches for spacebar presses while Resolve is
+    frontmost and toggles an internal flag.
+    """
+    from services import transport_monitor
+
+    is_playing = transport_monitor.get_is_playing()
+    seconds = resolve_service.get_playhead_seconds() if resolve_service.connected else None
+    return {"is_playing": is_playing, "seconds": seconds}
+
+
 class TransportRequest(BaseModel):
     action: str  # "play" or "stop"
 
@@ -153,9 +178,14 @@ async def transport_control(request: TransportRequest):
         # Send spacebar to Resolve without stealing focus from FinlayCut.
         # Using "tell process" instead of "activate" avoids the focus-switch
         # race condition that caused the double-press bug.
-        script = 'tell application "System Events" to tell process "DaVinci Resolve" to key code 49'
+        script = 'tell application "System Events" to tell process "Resolve" to key code 49'
         subprocess.run(["osascript", "-e", script], capture_output=True, timeout=3)
-        return {"success": True}
+
+        # Sync the transport monitor state (since we sent the key, not the user)
+        from services import transport_monitor
+        new_state = transport_monitor.toggle_playing()
+
+        return {"success": True, "is_playing": new_state}
     except Exception as e:
         logger.warning("Transport control failed: %s", e)
         return {"error": str(e)}

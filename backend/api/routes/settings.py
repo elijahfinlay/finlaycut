@@ -19,6 +19,7 @@ class SettingsUpdate(BaseModel):
     whisper_model: Optional[str] = None
     silence_threshold_db: Optional[int] = Field(None, ge=-80, le=0)
     silence_min_duration_ms: Optional[int] = Field(None, ge=50, le=10000)
+    silence_min_duration_frames: Optional[int] = Field(None, ge=14, le=240)
     silence_padding_ms: Optional[int] = Field(None, ge=0, le=5000)
     filler_words: Optional[list[str]] = None
     pexels_api_key: Optional[str] = None
@@ -40,6 +41,7 @@ async def get_settings():
         "whisper_model": settings.whisper_model,
         "silence_threshold_db": settings.silence_threshold_db,
         "silence_min_duration_ms": settings.silence_min_duration_ms,
+        "silence_min_duration_frames": max(14, int(settings.silence_min_duration_frames)),
         "silence_padding_ms": settings.silence_padding_ms,
         "filler_words": settings.filler_words,
         "has_pexels_key": bool(settings.pexels_api_key),
@@ -72,6 +74,9 @@ async def update_settings(update: SettingsUpdate):
 
     if update.silence_min_duration_ms is not None:
         settings.silence_min_duration_ms = update.silence_min_duration_ms
+
+    if update.silence_min_duration_frames is not None:
+        settings.silence_min_duration_frames = max(14, int(update.silence_min_duration_frames))
 
     if update.silence_padding_ms is not None:
         settings.silence_padding_ms = update.silence_padding_ms

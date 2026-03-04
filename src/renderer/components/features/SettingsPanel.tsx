@@ -28,6 +28,7 @@ export function SettingsPanel() {
         whisperModel: data.whisper_model,
         silenceThresholdDb: data.silence_threshold_db,
         silenceMinDurationMs: data.silence_min_duration_ms,
+        silenceMinDurationFrames: Math.max(14, data.silence_min_duration_frames ?? 14),
         silencePaddingMs: data.silence_padding_ms,
         fillerWords: data.filler_words,
         cacheLimitGb: data.cache_limit_gb,
@@ -62,6 +63,7 @@ export function SettingsPanel() {
           whisper_model: settings.whisperModel,
           silence_threshold_db: settings.silenceThresholdDb,
           silence_min_duration_ms: settings.silenceMinDurationMs,
+          silence_min_duration_frames: settings.silenceMinDurationFrames,
           silence_padding_ms: settings.silencePaddingMs,
           filler_words: settings.fillerWords,
           pexels_api_key: settings.pexelsApiKey,
@@ -193,6 +195,15 @@ export function SettingsPanel() {
             max={2000}
             step={50}
             unit=" ms"
+          />
+          <Slider
+            label="Min Silence Frames"
+            value={settings.silenceMinDurationFrames}
+            onChange={(v) => settings.updateSettings({ silenceMinDurationFrames: v })}
+            min={14}
+            max={48}
+            step={1}
+            unit=" f"
           />
           <Slider
             label="Backup Retention"

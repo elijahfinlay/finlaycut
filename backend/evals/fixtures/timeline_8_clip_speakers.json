@@ -1,0 +1,43 @@
+{
+  "id": "timeline_8_clip_speakers",
+  "enabled": true,
+  "audio_path": "../generated/timeline_8_clip.wav",
+  "fps": 23.976,
+  "language": "en",
+  "transcript_path": "../generated/timeline_8_clip.transcript.json",
+  "notes": "Reviewed speaker-turn baseline from Timeline 8. Labels the obvious guest -> interviewer question -> guest answer structure visible in the transcript.",
+  "filler": {
+    "enabled": false,
+    "expected": []
+  },
+  "silence": {
+    "enabled": false,
+    "expected": []
+  },
+  "speakers": {
+    "enabled": true,
+    "num_speakers": 2,
+    "minimum_accuracy": null,
+    "expected_segments": [
+      {
+        "start": 0.031,
+        "end": 48.634,
+        "speaker": "guest",
+        "notes": "Main subject introduction through 'I think.'"
+      },
+      {
+        "start": 51.044,
+        "end": 55.435,
+        "speaker": "interviewer",
+        "notes": "Off-camera question"
+      },
+      {
+        "start": 58.267,
+        "end": 86.214,
+        "speaker": "guest",
+        "notes": "Subject answer after the interviewer question"
+      }
+    ],
+    "expected_word_speakers": []
+  }
+}

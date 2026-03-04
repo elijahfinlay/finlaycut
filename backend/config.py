@@ -13,7 +13,7 @@ SETTINGS_FILE = Path.home() / ".finlaycut" / "settings.json"
 PERSISTED_FIELDS = [
     "ai_backend", "ollama_base_url", "ollama_model", "claude_api_key",
     "claude_model", "whisper_model", "silence_threshold_db",
-    "silence_min_duration_ms", "silence_padding_ms", "filler_words",
+    "silence_min_duration_ms", "silence_min_duration_frames", "silence_padding_ms", "filler_words",
     "pexels_api_key", "cache_limit_gb", "backup_retention_days",
 ]
 
@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     # Silence Detection Defaults
     silence_threshold_db: int = -40
     silence_min_duration_ms: int = 300
+    silence_min_duration_frames: int = 14
     silence_padding_ms: int = 100
 
     # Filler Words

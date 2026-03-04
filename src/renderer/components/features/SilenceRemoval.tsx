@@ -14,6 +14,10 @@ interface SilenceSegment {
   start: number
   end: number
   duration: number
+  start_frame?: number
+  end_frame?: number
+  kind?: string
+  boundary_source?: string
   selected: boolean
 }
 
@@ -32,6 +36,7 @@ export function SilenceRemoval() {
 
   const [threshold, setThreshold] = useState(storedSettings.threshold)
   const [minDuration, setMinDuration] = useState(storedSettings.minDuration)
+  const [minFrames, setMinFrames] = useState(Math.max(storedSettings.minFrames ?? 14, 14))
   const [padding, setPadding] = useState(storedSettings.padding)
   const [segments, setSegments] = useState<SilenceSegment[]>(storedSegments)
   const [applying, setApplying] = useState(false)
@@ -45,8 +50,8 @@ export function SilenceRemoval() {
   }, [segments, storeSegments])
 
   useEffect(() => {
-    storeSettings({ threshold, minDuration, padding })
-  }, [threshold, minDuration, padding, storeSettings])
+    storeSettings({ threshold, minDuration, minFrames, padding })
+  }, [threshold, minDuration, minFrames, padding, storeSettings])
 
   // Pickup: if operation completed while we were unmounted, grab the result
   useEffect(() => {
@@ -75,6 +80,7 @@ export function SilenceRemoval() {
         body: JSON.stringify({
           threshold_db: threshold,
           min_duration_ms: minDuration,
+          min_duration_frames: minFrames,
           padding_ms: padding
         }),
         signal: controller.signal
@@ -186,6 +192,15 @@ export function SilenceRemoval() {
             unit=" ms"
           />
           <Slider
+            label="Minimum Frames"
+            value={minFrames}
+            onChange={setMinFrames}
+            min={14}
+            max={48}
+            step={1}
+            unit=" f"
+          />
+          <Slider
             label="Padding"
             value={padding}
             onChange={setPadding}
@@ -241,8 +256,13 @@ export function SilenceRemoval() {
                       : 'bg-resolve-surfaceLight text-resolve-textMuted'
                   }`}
                 >
-                  <span className="font-mono">
-                    {formatTime(seg.start)} - {formatTime(seg.end)}
+                  <span className="flex items-center gap-2 font-mono">
+                    <span>{formatTime(seg.start)} - {formatTime(seg.end)}</span>
+                    {seg.kind === 'low_prominence_speech' && (
+                      <span className="rounded bg-resolve-warning/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-resolve-warning">
+                        Quiet Speech
+                      </span>
+                    )}
                   </span>
                   <span className="font-mono">{seg.duration.toFixed(1)}s</span>
                 </button>
