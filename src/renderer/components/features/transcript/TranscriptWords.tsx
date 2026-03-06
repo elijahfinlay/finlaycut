@@ -13,7 +13,7 @@ import {
 export interface TranscriptWordsProps {
   words: TranscriptWord[]
   activeWordIndex: number | null
-  activeWordRef: React.RefObject<HTMLSpanElement | null>
+  activeWordRef: React.RefObject<HTMLSpanElement>
   showTimestamps: boolean
   framerate: string
   autoDetectFillers: boolean

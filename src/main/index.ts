@@ -108,14 +108,17 @@ app.whenReady().then(async () => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  // Start Python backend
   pythonManager = new PythonManager()
-  await pythonManager.start()
-
-  // Register IPC handlers
   registerIpcHandlers(pythonManager)
-
   createWindow()
+
+  void pythonManager.start().catch((error) => {
+    try {
+      console.error('[FinlayCut] Backend startup failed:', error)
+    } catch {
+      // Ignore logging failures.
+    }
+  })
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

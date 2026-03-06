@@ -19,10 +19,9 @@ def assemble_current_timeline_audio() -> tuple[str | None, float | None, int | N
     if timeline is None:
         return None, None, None, None
 
-    clips = resolve_service.get_timeline_clips("audio", 1)
-    if not clips:
-        clips = resolve_service.get_timeline_clips("video", 1)
-    if not clips:
+    selection = resolve_service.get_timeline_audio_clip_contexts()
+    clip_contexts = selection["contexts"]
+    if not selection["has_any_items"]:
         return None, None, None, None
 
     fps_str = timeline.GetSetting("timelineFrameRate")
@@ -31,13 +30,17 @@ def assemble_current_timeline_audio() -> tuple[str | None, float | None, int | N
     timeline_end_frame = int(timeline.GetEndFrame())
     timeline_duration_seconds = max(0.0, (timeline_end_frame - timeline_start_frame) / fps)
 
+    if not clip_contexts:
+        rendered_audio = resolve_service.render_current_timeline_audio(
+            fallback_restore_page="edit",
+        )
+        if rendered_audio:
+            return rendered_audio, fps, timeline_start_frame, timeline_end_frame
+        return None, fps, timeline_start_frame, timeline_end_frame
+
     audio_cache: dict[str, str] = {}
     clip_segments: list[dict] = []
-    for clip in clips:
-        clip_context = resolve_service.get_clip_audio_context(clip)
-        if clip_context is None:
-            continue
-
+    for clip_context in clip_contexts:
         file_path = str(clip_context["file_path"])
         if file_path not in audio_cache:
             audio_cache[file_path] = extract_audio(file_path)

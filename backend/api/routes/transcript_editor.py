@@ -10,6 +10,7 @@ from services.resolve_service import resolve_service
 from services.audio_service import audio_service
 from services.diarization_service import diarization_service
 from utils.audio_utils import extract_audio, extract_audio_segment, assemble_timeline_audio
+from services.audio_state import set_last_transcription_audio
 from utils.operation_queue import heavy_operation
 from utils.speaker_analysis import build_speaker_summaries, compute_speaker_loudness
 from api.websocket import manager
@@ -193,95 +194,139 @@ async def transcribe_timeline(request: TranscribeRequest):
         range_label = f" (range {range_in:.1f}s - {range_out:.1f}s)"
         logger.info("Transcribing timeline range: %.1fs - %.1fs", range_in, range_out)
 
-    # Get ALL clips — prefer audio track 1, fall back to video track 1
-    clips = resolve_service.get_timeline_clips("audio", 1)
-    if not clips:
-        clips = resolve_service.get_timeline_clips("video", 1)
-    if not clips:
+    clip_selection = resolve_service.get_timeline_audio_clip_contexts()
+    clip_contexts = clip_selection["contexts"]
+    if not clip_selection["has_any_items"]:
         return {"error": "No clips found in timeline. Make sure your timeline has at least one clip."}
+    rendered_timeline_audio = None
+    if not clip_contexts:
+        logger.warning("Transcript extraction found no usable clip sources: %s", clip_selection["attempts"])
+        render_mark_in = None
+        render_mark_out = None
+        if is_range:
+            render_mark_in = timeline_start_frame + int(round(float(range_in) * fps))
+            render_mark_out = timeline_start_frame + int(round(float(range_out) * fps)) - 1
+        rendered_timeline_audio = resolve_service.render_current_timeline_audio(
+            "finlaycut_transcript",
+            mark_in_frame=render_mark_in,
+            mark_out_frame=render_mark_out,
+            fallback_restore_page="edit",
+        )
+        if not rendered_timeline_audio:
+            return {"error": "Could not extract audio from any timeline clips."}
+        logger.info("Using rendered timeline audio fallback for transcript extraction")
 
-    logger.info("Transcribing timeline%s: %d clips, %.1fs total duration", range_label, len(clips), timeline_duration_seconds)
+    logger.info(
+        "Transcribing timeline%s: %d usable clips from %s track %s, %.1fs total duration",
+        range_label,
+        len(clip_contexts),
+        clip_selection["selected_media_type"],
+        clip_selection["selected_track_index"],
+        timeline_duration_seconds,
+    )
 
     try:
-        await manager.send_progress("transcript_editor", 0.02, f"Extracting audio from {len(clips)} clip(s)...{range_label}")
-
-        # Extract audio for each clip's source range
-        audio_cache: dict[str, str] = {}  # source file -> extracted WAV path
         clip_segments: list[dict] = []
-
-        for i, clip in enumerate(clips):
-            file_path = resolve_service.get_clip_file_path(clip)
-            if not file_path:
-                logger.warning("Clip %d has no file path, skipping", i)
-                continue
-
-            clip_start_frame = int(clip.GetStart())
-            clip_end_frame = int(clip.GetEnd())
-            clip_timeline_start_sec = (clip_start_frame - timeline_start_frame) / fps
-            clip_timeline_end_sec = (clip_end_frame - timeline_start_frame) / fps
-            clip_duration_sec = (clip_end_frame - clip_start_frame) / fps
-
-            # Skip clips entirely outside the in/out range
-            if is_range:
-                if clip_timeline_end_sec <= range_in or clip_timeline_start_sec >= range_out:
-                    continue
-
-            pct = 0.02 + (i / len(clips)) * 0.08
-            await manager.send_progress("transcript_editor", pct,
-                f"Extracting audio ({i + 1}/{len(clips)} clips)...")
-
-            # Extract full audio from source file (cached per unique file)
-            if file_path not in audio_cache:
-                audio_cache[file_path] = extract_audio(file_path)
-            full_audio = audio_cache[file_path]
-
-            # Extract just the source range visible in the timeline
-            source_range = resolve_service.get_timeline_item_source_range(clip)
-            if source_range:
-                src_start = source_range["source_start_frame"] / fps
-                src_end = source_range["source_end_frame"] / fps
-                try:
-                    clip_audio = extract_audio_segment(full_audio, src_start, src_end)
-                except Exception as e:
-                    logger.warning("Segment extraction failed for clip %d (%s), using full audio", i, e)
-                    clip_audio = full_audio
-            else:
-                clip_audio = full_audio
-
-            clip_segments.append({
-                "audio_path": clip_audio,
-                "timeline_start_seconds": clip_timeline_start_sec,
-                "timeline_end_seconds": clip_timeline_end_sec,
-                "duration_seconds": clip_duration_sec,
-                "timeline_start_frame": clip_start_frame,
-                "timeline_end_frame": clip_end_frame,
-                "source_start_frame": int(source_range["source_start_frame"]) if source_range else None,
-                "source_end_frame": int(source_range["source_end_frame"]) if source_range else None,
-                "file_path": file_path,
-                "clip_item_id": resolve_service.get_timeline_item_unique_id(clip),
-            })
-
-        if not clip_segments:
-            return {"error": "No clips found in the selected range." if is_range else "Could not extract audio from any timeline clips."}
-
-        # Assemble into single timeline audio
-        await manager.send_progress("transcript_editor", 0.10, "Assembling timeline audio...")
-
-        if len(clip_segments) == 1 and not is_range:
-            # Single clip full timeline — use its audio directly, track the timeline offset
-            audio_path = clip_segments[0]["audio_path"]
-            audio_offset = clip_segments[0]["timeline_start_seconds"]
+        if rendered_timeline_audio:
+            await manager.send_progress("transcript_editor", 0.10, "Using rendered timeline audio...")
+            audio_path = rendered_timeline_audio
+            audio_offset = 0.0
+            set_last_transcription_audio(audio_path, timeline_duration_seconds)
         else:
-            # Multiple clips or range mode — stitch into one file with correct timeline positions
-            audio_path = assemble_timeline_audio(clip_segments, timeline_duration_seconds)
-            audio_offset = 0.0  # Assembled audio starts at timeline start
+            await manager.send_progress(
+                "transcript_editor",
+                0.02,
+                f"Extracting audio from {len(clip_contexts)} clip(s)...{range_label}",
+            )
+
+            # Extract audio for each clip's source range
+            audio_cache: dict[str, str] = {}  # source file -> extracted WAV path
+
+            for i, clip_context in enumerate(clip_contexts):
+                file_path = str(clip_context["file_path"])
+                clip_start_frame = int(clip_context["clip_start_frame"])
+                clip_end_frame = int(clip_context["clip_end_frame"])
+                clip_timeline_start_sec = float(clip_context["clip_timeline_offset"])
+                clip_duration_sec = float(clip_context["clip_duration_seconds"])
+                clip_timeline_end_sec = clip_timeline_start_sec + clip_duration_sec
+
+                # Skip clips entirely outside the in/out range
+                if is_range:
+                    if clip_timeline_end_sec <= range_in or clip_timeline_start_sec >= range_out:
+                        continue
+
+                pct = 0.02 + (i / len(clip_contexts)) * 0.08
+                await manager.send_progress(
+                    "transcript_editor",
+                    pct,
+                    f"Extracting audio ({i + 1}/{len(clip_contexts)} clips)...",
+                )
+
+                # Extract full audio from source file (cached per unique file)
+                if file_path not in audio_cache:
+                    audio_cache[file_path] = extract_audio(file_path)
+                full_audio = audio_cache[file_path]
+
+                # Extract just the source range visible in the timeline
+                source_start_seconds = clip_context.get("source_start_seconds")
+                source_end_seconds = clip_context.get("source_end_seconds")
+                if source_start_seconds is not None and source_end_seconds is not None:
+                    try:
+                        clip_audio = extract_audio_segment(
+                            full_audio,
+                            float(source_start_seconds),
+                            float(source_end_seconds),
+                        )
+                    except Exception as e:
+                        logger.warning("Segment extraction failed for clip %d (%s), using full audio", i, e)
+                        clip_audio = full_audio
+                else:
+                    # No source range — cap to clip duration to avoid using full source file
+                    try:
+                        clip_audio = extract_audio_segment(full_audio, 0, clip_duration_sec)
+                    except Exception:
+                        clip_audio = full_audio
+
+                clip_segments.append({
+                    "audio_path": clip_audio,
+                    "timeline_start_seconds": clip_timeline_start_sec,
+                    "timeline_end_seconds": clip_timeline_end_sec,
+                    "duration_seconds": clip_duration_sec,
+                    "timeline_start_frame": clip_start_frame,
+                    "timeline_end_frame": clip_end_frame,
+                    "source_start_frame": int(clip_context["source_start_frame"]) if clip_context.get("source_start_frame") is not None else None,
+                    "source_end_frame": int(clip_context["source_end_frame"]) if clip_context.get("source_end_frame") is not None else None,
+                    "file_path": file_path,
+                    "clip_item_id": clip_context.get("clip_item_id"),
+                })
+
+            if not clip_segments:
+                return {"error": "No clips found in the selected range." if is_range else "Could not extract audio from any timeline clips."}
+
+            # Assemble into single timeline audio
+            await manager.send_progress("transcript_editor", 0.10, "Assembling timeline audio...")
+
+            if len(clip_segments) == 1 and not is_range:
+                # Single clip full timeline — use its audio directly, track the timeline offset
+                audio_path = clip_segments[0]["audio_path"]
+                audio_offset = clip_segments[0]["timeline_start_seconds"]
+            else:
+                # Multiple clips or range mode — stitch into one file with correct timeline positions
+                audio_path = assemble_timeline_audio(clip_segments, timeline_duration_seconds)
+                audio_offset = 0.0  # Assembled audio starts at timeline start
+
+            # Store for waveform reuse (before any range trimming)
+            set_last_transcription_audio(audio_path, timeline_duration_seconds)
 
         # If range mode, trim the assembled audio to just the in/out range
         if is_range and audio_offset == 0.0:
             try:
-                trimmed_path = extract_audio_segment(audio_path, range_in, range_out)
-                audio_path = trimmed_path
-                audio_offset = range_in  # Words start at the in-point on the timeline
+                if rendered_timeline_audio:
+                    audio_offset = range_in  # Rendered fallback already matches the requested span
+                else:
+                    trimmed_path = extract_audio_segment(audio_path, range_in, range_out)
+                    audio_path = trimmed_path
+                    audio_offset = range_in  # Words start at the in-point on the timeline
             except Exception as e:
                 logger.warning("Range trim failed (%s), transcribing full audio", e)
 

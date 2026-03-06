@@ -28,6 +28,9 @@ export interface TranscriptWord {
   speaker?: string
   speaker_index?: number
   probability: number
+  alignment_confidence?: number
+  alignment_method?: string
+  boundary_refined?: boolean
   action: WordAction
   selected: boolean
   deleted?: boolean
@@ -42,6 +45,7 @@ export interface Segment {
   source_end_frame?: number
   kind?: string
   label?: string
+  boundary_refined?: boolean
 }
 
 export interface TranscriptContext {
@@ -267,6 +271,11 @@ export function adjustFillerSegmentForRemoval(
   releasePadFrames: number = FILLER_RELEASE_PAD_FRAMES,
   minVisibleFrames: number = 1
 ): Segment | null {
+  if (segment.boundary_refined) {
+    onsetExpandFrames = 0
+    releasePadFrames = 0
+  }
+
   const derivedSpanFrames =
     typeof segment.start_frame === 'number' && typeof segment.end_frame === 'number'
       ? Math.max(0, segment.end_frame - segment.start_frame)
@@ -453,6 +462,12 @@ export function normalizeWord(raw: any): TranscriptWord {
     speaker_index:
       typeof raw?.speaker_index === 'number' ? raw.speaker_index : undefined,
     probability: Number(raw?.probability || 0),
+    alignment_confidence:
+      typeof raw?.alignment_confidence === 'number' ? raw.alignment_confidence : undefined,
+    alignment_method:
+      typeof raw?.alignment_method === 'string' ? raw.alignment_method : undefined,
+    boundary_refined:
+      typeof raw?.boundary_refined === 'boolean' ? raw.boundary_refined : undefined,
     action,
     selected: Boolean(raw?.selected),
   }
@@ -474,6 +489,7 @@ export function mergeWordSegments(
   let currentEndFrame: number | undefined
   let currentSourceStartFrame: number | undefined
   let currentSourceEndFrame: number | undefined
+  let currentBoundaryRefined: boolean | undefined
 
   for (const word of words) {
     if (include(word)) {
@@ -488,6 +504,7 @@ export function mergeWordSegments(
           typeof word.source_start_frame === 'number' ? word.source_start_frame : undefined
         currentSourceEndFrame =
           typeof word.source_end_frame === 'number' ? word.source_end_frame : undefined
+        currentBoundaryRefined = word.boundary_refined || undefined
       } else if (word.start - currentEnd <= MERGE_GAP_SECONDS) {
         currentEnd = Math.max(currentEnd, word.end)
         if (typeof word.end_frame === 'number') {
@@ -504,6 +521,7 @@ export function mergeWordSegments(
           end_frame: currentEndFrame,
           source_start_frame: currentSourceStartFrame,
           source_end_frame: currentSourceEndFrame,
+          boundary_refined: currentBoundaryRefined,
         })
         currentStart = word.start
         currentEnd = word.end
@@ -515,6 +533,7 @@ export function mergeWordSegments(
           typeof word.source_start_frame === 'number' ? word.source_start_frame : undefined
         currentSourceEndFrame =
           typeof word.source_end_frame === 'number' ? word.source_end_frame : undefined
+        currentBoundaryRefined = word.boundary_refined || undefined
       }
     } else if (currentStart !== null && currentEnd !== null) {
       segments.push({
@@ -524,6 +543,7 @@ export function mergeWordSegments(
         end_frame: currentEndFrame,
         source_start_frame: currentSourceStartFrame,
         source_end_frame: currentSourceEndFrame,
+        boundary_refined: currentBoundaryRefined,
       })
       currentStart = null
       currentEnd = null
@@ -531,6 +551,7 @@ export function mergeWordSegments(
       currentEndFrame = undefined
       currentSourceStartFrame = undefined
       currentSourceEndFrame = undefined
+      currentBoundaryRefined = undefined
     }
   }
 
@@ -542,6 +563,7 @@ export function mergeWordSegments(
       end_frame: currentEndFrame,
       source_start_frame: currentSourceStartFrame,
       source_end_frame: currentSourceEndFrame,
+      boundary_refined: currentBoundaryRefined,
     })
   }
 

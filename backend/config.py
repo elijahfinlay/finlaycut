@@ -15,6 +15,8 @@ PERSISTED_FIELDS = [
     "claude_model", "whisper_model", "silence_threshold_db",
     "silence_min_duration_ms", "silence_min_duration_frames", "silence_padding_ms", "filler_words",
     "pexels_api_key", "cache_limit_gb", "backup_retention_days",
+    "alignment_method", "alignment_waveform_refine", "alignment_confidence_threshold",
+    "alignment_timing_offset_ms",
 ]
 
 
@@ -44,6 +46,12 @@ class Settings(BaseSettings):
     whisper_model: str = "medium"
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"  # "float16" for GPU, "int8" for CPU
+
+    # Alignment
+    alignment_method: str = "mms_fa"              # "mms_fa" | "whisperx"
+    alignment_waveform_refine: bool = True        # post-alignment waveform refinement
+    alignment_confidence_threshold: float = 0.5   # below = flagged low confidence
+    alignment_timing_offset_ms: float = 50.0      # positive = shift words earlier (ms)
 
     # Silence Detection Defaults
     silence_threshold_db: int = -40

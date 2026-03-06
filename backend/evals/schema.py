@@ -1,101 +1,37 @@
-"""Pydantic models for fixture-driven quality evaluation."""
+"""
+Evaluation schema for word-level alignment accuracy testing.
 
-from __future__ import annotations
+Defines the data models for alignment evaluation fixtures — ground-truth
+word boundaries that can be compared against the alignment pipeline output.
+"""
 
-from pydantic import BaseModel, Field, model_validator
-
-
-class IntervalExpectation(BaseModel):
-    start: float
-    end: float
-    label: str | None = None
-    kind: str | None = None
-    optional: bool = False
-    notes: str | None = None
-
-    @model_validator(mode="after")
-    def validate_range(self) -> "IntervalExpectation":
-        if float(self.end) <= float(self.start):
-            raise ValueError("end must be greater than start")
-        return self
+from pydantic import BaseModel
+from typing import Optional
 
 
-class SpeakerSegmentExpectation(BaseModel):
-    start: float
-    end: float
-    speaker: str
-    optional: bool = False
-    notes: str | None = None
-
-    @model_validator(mode="after")
-    def validate_range(self) -> "SpeakerSegmentExpectation":
-        if float(self.end) <= float(self.start):
-            raise ValueError("end must be greater than start")
-        return self
+class WordAlignmentExpectation(BaseModel):
+    """Ground-truth word boundary for a single word."""
+    word: str
+    expected_start: float           # seconds
+    expected_end: float             # seconds
+    tolerance_ms: float = 66.0      # default: 2 frames at 30fps
 
 
-class WordSpeakerExpectation(BaseModel):
-    word_index: int = Field(ge=0)
-    speaker: str
-    optional: bool = False
-
-
-class FillerEvaluationConfig(BaseModel):
-    enabled: bool = False
-    filler_words: list[str] | None = None
-    match_tolerance_ms: int = Field(140, ge=0, le=2000)
-    minimum_f1: float | None = Field(default=None, ge=0.0, le=1.0)
-    expected: list[IntervalExpectation] = Field(default_factory=list)
-
-
-class SilenceEvaluationConfig(BaseModel):
-    enabled: bool = False
-    threshold_db: int = -40
-    min_duration_ms: int = Field(300, ge=1, le=60000)
-    min_duration_frames: int = Field(14, ge=14, le=240)
-    match_tolerance_ms: int = Field(160, ge=0, le=2000)
-    minimum_f1: float | None = Field(default=None, ge=0.0, le=1.0)
-    expected: list[IntervalExpectation] = Field(default_factory=list)
-
-
-class SpeakerEvaluationConfig(BaseModel):
-    enabled: bool = False
-    num_speakers: int | None = Field(default=None, ge=1, le=10)
-    minimum_accuracy: float | None = Field(default=None, ge=0.0, le=1.0)
-    expected_segments: list[SpeakerSegmentExpectation] = Field(default_factory=list)
-    expected_word_speakers: list[WordSpeakerExpectation] = Field(default_factory=list)
+class AlignmentEvaluationConfig(BaseModel):
+    """Configuration for an alignment accuracy evaluation."""
+    audio_path: str
+    language: str = "en"
+    word_expectations: list[WordAlignmentExpectation]
+    # Global tolerance override (if set, applies to all words)
+    global_tolerance_ms: Optional[float] = None
+    # Targets
+    target_median_error_ms: float = 15.0
+    target_pct_within_1_frame: float = 85.0   # % of words within 33ms
+    target_pct_within_2_frames: float = 95.0  # % of words within 66ms
 
 
 class EvaluationFixture(BaseModel):
-    id: str
-    audio_path: str
-    enabled: bool = True
-    fps: float = Field(24.0, gt=0.0, le=240.0)
-    language: str | None = None
-    notes: str | None = None
-    transcript_path: str | None = None
-    transcript: dict | None = None
-    filler: FillerEvaluationConfig = Field(default_factory=FillerEvaluationConfig)
-    silence: SilenceEvaluationConfig = Field(default_factory=SilenceEvaluationConfig)
-    speakers: SpeakerEvaluationConfig = Field(default_factory=SpeakerEvaluationConfig)
-
-    @model_validator(mode="after")
-    def validate_fixture(self) -> "EvaluationFixture":
-        enabled_tasks = []
-        if self.filler.enabled:
-            enabled_tasks.append("filler")
-            if not self.filler.expected:
-                raise ValueError("filler.enabled requires filler.expected")
-        if self.silence.enabled:
-            enabled_tasks.append("silence")
-            if not self.silence.expected:
-                raise ValueError("silence.enabled requires silence.expected")
-        if self.speakers.enabled:
-            enabled_tasks.append("speakers")
-            if not self.speakers.expected_segments and not self.speakers.expected_word_speakers:
-                raise ValueError(
-                    "speakers.enabled requires speakers.expected_segments or speakers.expected_word_speakers"
-                )
-        if not enabled_tasks:
-            raise ValueError("fixture must enable at least one evaluation task")
-        return self
+    """A complete evaluation fixture with metadata."""
+    name: str
+    description: str = ""
+    alignment_config: Optional[AlignmentEvaluationConfig] = None

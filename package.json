@@ -11,7 +11,11 @@
     "preview": "electron-vite preview",
     "start": "electron-vite dev",
     "postinstall": "electron-builder install-app-deps",
-    "build:mac": "electron-vite build && electron-builder --mac",
+    "prepare:package-assets": "./scripts/prepare-package-assets.sh",
+    "build:mac": "npm run prepare:package-assets && electron-vite build && electron-builder --mac",
+    "build:mac:dir": "npm run prepare:package-assets && electron-vite build && electron-builder --mac dir",
+    "build:mac:arm64:dir": "FINLAYCUT_TARGET_ARCH=arm64 npm run prepare:package-assets && electron-vite build && electron-builder --mac dir --arm64",
+    "build:mac:x64:dir": "FINLAYCUT_TARGET_ARCH=x64 npm run prepare:package-assets && electron-vite build && electron-builder --mac dir --x64",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck": "npm run typecheck:web && npm run typecheck:node",
@@ -57,6 +61,14 @@
       {
         "from": "backend",
         "to": "backend"
+      },
+      {
+        "from": "resources/bin",
+        "to": "bin"
+      },
+      {
+        "from": "resources/python-runtime",
+        "to": "python-runtime"
       }
     ]
   }

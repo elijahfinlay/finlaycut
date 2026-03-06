@@ -10,3 +10,6 @@ __pycache__/
 backend/.venv/
 resources/models/
 .finlaycut/
+resources/bin/ffmpeg
+resources/bin/ffprobe
+resources/python-runtime/

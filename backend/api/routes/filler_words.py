@@ -155,8 +155,7 @@ def _clamp_filler_cut_frame_range(
         if prev_word_end is not None:
             prev_word_end_frame = int(timeline_start_frame) + int(round(prev_word_end * float(fps)))
     if prev_word_end_frame is not None:
-        guard_frames = max(1, int(round(0.15 * float(fps))))
-        clamped_start = max(clamped_start, int(prev_word_end_frame) - guard_frames)
+        clamped_start = max(clamped_start, int(prev_word_end_frame))
 
     next_word_start_frame = filler.get("next_word_start_frame")
     if next_word_start_frame is None:

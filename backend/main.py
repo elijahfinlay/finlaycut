@@ -36,6 +36,11 @@ warnings.filterwarnings(
 # which breaks inside Electron.  Monkey-patch it early so every
 # library that touches pydub gets the right binary.
 def _resolve_bin(name: str) -> str:
+    env_override = os.environ.get(
+        "FINLAYCUT_FFMPEG_PATH" if name == "ffmpeg" else "FINLAYCUT_FFPROBE_PATH"
+    )
+    if env_override and os.path.isfile(env_override):
+        return env_override
     p = shutil.which(name)
     if p:
         return p
@@ -123,16 +128,17 @@ async def lifespan(app: FastAPI):
     # Clean stale temp files from previous sessions
     _cleanup_stale_temp_files()
 
+    loop = asyncio.get_running_loop()
+
     # Startup: try initial connection to Resolve
-    resolve_service.try_connect()
+    loop.run_in_executor(None, resolve_service.try_connect)
 
     # Start background polling for Resolve state changes
     poll_task = asyncio.create_task(resolve_service.poll_loop())
 
-    # Start global key-event monitor for Resolve transport detection
-    loop = asyncio.get_running_loop()
+    # The Quartz event tap can stall startup on some machines. Keep the app usable
+    # even when transport monitoring is unavailable.
     from services import transport_monitor
-    transport_monitor.start(loop=loop)
 
     # Preload Whisper model in a background thread (non-blocking)
     loop.run_in_executor(None, _preload_whisper)
@@ -141,8 +147,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("FinlayCut backend shutting down")
-    from services import transport_monitor as _tm
-    _tm.stop()
+    transport_monitor.stop()
     poll_task.cancel()
     try:
         await poll_task

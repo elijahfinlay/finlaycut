@@ -10,6 +10,15 @@ export function registerIpcHandlers(pythonManager: PythonManager): void {
     return pythonManager.isRunning
   })
 
+  ipcMain.handle('get-backend-diagnostics', () => {
+    return pythonManager.diagnostics
+  })
+
+  ipcMain.handle('retry-backend-start', async () => {
+    await pythonManager.start()
+    return pythonManager.diagnostics
+  })
+
   ipcMain.handle('open-file-dialog', async (_, options) => {
     const result = await dialog.showOpenDialog({
       properties: ['openFile'],

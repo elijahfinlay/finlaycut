@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Optional
 from config import settings
 from utils.resolve_connection import get_resolve, get_project_info
@@ -130,13 +131,13 @@ class ResolveService:
         while True:
             try:
                 if not self.connected:
-                    self.try_connect()
+                    await asyncio.to_thread(self.try_connect)
                 else:
                     # Verify connection is still alive
-                    status = self.get_status()
+                    status = await asyncio.to_thread(self.get_status)
                     if not status["connected"]:
                         logger.warning("Lost connection, will retry...")
-                        self.try_connect()
+                        await asyncio.to_thread(self.try_connect)
 
                     # Check timeline signature every 2nd cycle (~4s)
                     if self._watched_signature:
@@ -763,6 +764,444 @@ class ResolveService:
             return items if items else []
         except Exception:
             return []
+
+    def _iter_audio_extraction_track_candidates(self, timeline, preferred_track_index: int = 1):
+        """Yield track candidates in a stable priority order for timeline audio extraction."""
+        seen: set[tuple[str, int]] = set()
+
+        for media_type in ("audio", "video"):
+            try:
+                track_count = int(timeline.GetTrackCount(media_type) or 0)
+            except Exception:
+                track_count = 0
+            if 1 <= int(preferred_track_index) <= track_count:
+                key = (media_type, int(preferred_track_index))
+                if key not in seen:
+                    seen.add(key)
+                    yield key
+
+        for media_type in ("audio", "video"):
+            try:
+                track_count = int(timeline.GetTrackCount(media_type) or 0)
+            except Exception:
+                track_count = 0
+            for track_index in range(1, track_count + 1):
+                key = (media_type, track_index)
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield key
+
+    def get_timeline_audio_clip_contexts(self, preferred_track_index: int = 1) -> dict:
+        """
+        Pick the best available timeline track for audio extraction and return usable clip contexts.
+
+        Some Resolve timelines expose unusable items on audio track 1 even when video track 1
+        still points at valid source media. We inspect both preferred tracks first, then any
+        remaining tracks, and keep the candidate with the highest usable clip count.
+        """
+        timeline = self.get_current_timeline()
+        base_result = {
+            "timeline": timeline,
+            "contexts": [],
+            "attempts": [],
+            "has_any_items": False,
+            "selected_media_type": None,
+            "selected_track_index": None,
+            "clip_count": 0,
+            "usable_count": 0,
+        }
+        if timeline is None:
+            return base_result
+
+        best_selection: dict | None = None
+
+        for media_type, track_index in self._iter_audio_extraction_track_candidates(
+            timeline,
+            preferred_track_index=preferred_track_index,
+        ):
+            items = self.get_timeline_clips(media_type, track_index)
+            clip_count = len(items)
+            if clip_count == 0:
+                base_result["attempts"].append({
+                    "media_type": media_type,
+                    "track_index": int(track_index),
+                    "clip_count": 0,
+                    "usable_count": 0,
+                    "missing_file_path_count": 0,
+                    "invalid_context_count": 0,
+                })
+                continue
+
+            base_result["has_any_items"] = True
+            contexts: list[dict] = []
+            missing_file_path_count = 0
+            invalid_context_count = 0
+
+            for item in items:
+                context = self.get_clip_audio_context(item)
+                if context is not None:
+                    contexts.append(context)
+                    continue
+
+                if self.get_clip_file_path(item):
+                    invalid_context_count += 1
+                else:
+                    missing_file_path_count += 1
+
+            attempt = {
+                "media_type": media_type,
+                "track_index": int(track_index),
+                "clip_count": clip_count,
+                "usable_count": len(contexts),
+                "missing_file_path_count": missing_file_path_count,
+                "invalid_context_count": invalid_context_count,
+            }
+            base_result["attempts"].append(attempt)
+
+            if not contexts:
+                continue
+
+            if best_selection is None or len(contexts) > int(best_selection["usable_count"]):
+                best_selection = {
+                    **attempt,
+                    "contexts": contexts,
+                }
+
+        if best_selection is None:
+            logger.warning(
+                "No usable clips found for timeline audio extraction across %d track candidates",
+                len(base_result["attempts"]),
+            )
+            return base_result
+
+        result = {
+            **base_result,
+            "contexts": best_selection["contexts"],
+            "selected_media_type": best_selection["media_type"],
+            "selected_track_index": best_selection["track_index"],
+            "clip_count": best_selection["clip_count"],
+            "usable_count": best_selection["usable_count"],
+        }
+
+        selected_key = (result["selected_media_type"], result["selected_track_index"])
+        preferred_key = ("audio", int(preferred_track_index))
+        if selected_key != preferred_key or int(result["usable_count"]) < int(result["clip_count"]):
+            logger.info(
+                "Using %s track %d for timeline audio extraction (%d/%d usable clips)",
+                result["selected_media_type"],
+                result["selected_track_index"],
+                result["usable_count"],
+                result["clip_count"],
+            )
+
+        return result
+
+    def _pick_audio_render_format_and_codec(self, project) -> tuple[str, str, str | None] | None:
+        """Choose a render format/codec combination that can produce an audio file."""
+        try:
+            formats = project.GetRenderFormats() or {}
+        except Exception:
+            formats = {}
+
+        if not isinstance(formats, dict) or not formats:
+            logger.warning("Resolve did not return any render formats for timeline audio fallback")
+            return None
+
+        preferred_formats: list[tuple[str, str]] = []
+        for format_key in ("wav", "aiff", "aif", "mp3", "mov"):
+            extension = formats.get(format_key)
+            if extension:
+                preferred_formats.append((str(format_key), str(extension).lstrip(".")))
+
+        if not preferred_formats:
+            first_format, first_extension = next(iter(formats.items()))
+            preferred_formats.append((str(first_format), str(first_extension).lstrip(".")))
+
+        for format_key, extension in preferred_formats:
+            try:
+                codecs = project.GetRenderCodecs(format_key) or {}
+            except Exception:
+                codecs = {}
+
+            codec_values: list[str] = []
+            if isinstance(codecs, dict):
+                codec_values = [str(value) for value in codecs.values() if value]
+            elif isinstance(codecs, (list, tuple, set)):
+                codec_values = [str(value) for value in codecs if value]
+
+            preferred_codecs: list[str] = []
+            for codec in codec_values:
+                lowered = codec.lower()
+                if format_key in ("wav", "aiff", "aif") and ("pcm" in lowered or "lpcm" in lowered):
+                    preferred_codecs.append(codec)
+                elif format_key == "mp3" and "mp3" in lowered:
+                    preferred_codecs.append(codec)
+
+            ordered_codecs = preferred_codecs + [codec for codec in codec_values if codec not in preferred_codecs]
+            if not ordered_codecs:
+                ordered_codecs = [None]
+
+            for codec in ordered_codecs:
+                try:
+                    if codec is None:
+                        return format_key, extension, None
+                    if project.SetCurrentRenderFormatAndCodec(format_key, codec):
+                        return format_key, extension, codec
+                except Exception:
+                    continue
+
+        logger.warning("Could not find a usable render format/codec for timeline audio fallback")
+        return None
+
+    def _load_render_preset_for_audio(self, project) -> str | None:
+        """Load any available render preset so Resolve has a valid deliver baseline."""
+        preset_names: list[str] = []
+
+        for getter_name in ("GetRenderPresetList", "GetRenderPresets"):
+            getter = getattr(project, getter_name, None)
+            if not callable(getter):
+                continue
+            try:
+                raw_presets = getter() or []
+            except Exception:
+                continue
+
+            if isinstance(raw_presets, dict):
+                preset_names = [str(value) for value in raw_presets.values() if value]
+            else:
+                preset_names = [str(value) for value in raw_presets if value]
+
+            if preset_names:
+                break
+
+        if not preset_names:
+            return None
+
+        ordered_presets = [name for name in preset_names if "audio" in name.lower()]
+        ordered_presets.extend(name for name in preset_names if name not in ordered_presets)
+
+        for preset_name in ordered_presets:
+            try:
+                if project.LoadRenderPreset(preset_name):
+                    return preset_name
+            except Exception:
+                continue
+
+        return None
+
+    def _get_current_page_name(self) -> str | None:
+        """Best-effort read of Resolve's current page name."""
+        resolve = self._resolve
+        if resolve is None:
+            return None
+
+        getter = getattr(resolve, "GetCurrentPage", None)
+        if not callable(getter):
+            return None
+
+        try:
+            page_name = getter()
+        except Exception:
+            return None
+
+        return str(page_name) if page_name else None
+
+    def _open_resolve_page(self, page_name: str) -> bool:
+        """Best-effort page switch in Resolve."""
+        resolve = self._resolve
+        if resolve is None:
+            return False
+
+        opener = getattr(resolve, "OpenPage", None)
+        if not callable(opener):
+            return False
+
+        try:
+            result = opener(page_name)
+        except Exception:
+            return False
+
+        return bool(result is None or result)
+
+    def _restore_resolve_page(self, page_name: str | None, retries: int = 3, delay_seconds: float = 0.15) -> None:
+        """Return Resolve to the user's original page after temporary Deliver renders."""
+        if not page_name:
+            return
+
+        current_page = self._get_current_page_name()
+        if current_page == page_name:
+            return
+
+        for attempt in range(max(retries, 1)):
+            if self._open_resolve_page(page_name):
+                current_page = self._get_current_page_name()
+                if current_page is None or current_page == page_name:
+                    return
+            if attempt < retries - 1:
+                time.sleep(delay_seconds)
+
+        logger.warning("Failed to restore Resolve page to %s after timeline audio render", page_name)
+
+    def render_current_timeline_audio(
+        self,
+        name_prefix: str = "finlaycut_timeline_audio",
+        mark_in_frame: int | None = None,
+        mark_out_frame: int | None = None,
+        fallback_restore_page: str | None = None,
+    ) -> str | None:
+        """
+        Render the current timeline's audible mix to a temp file.
+
+        This is a fallback for timelines whose clips do not expose source file paths via
+        Resolve's timeline item API, such as nested or compound timeline items.
+        """
+        if not self.connected:
+            return None
+
+        project = self.get_current_project()
+        timeline = self.get_current_timeline()
+        if project is None or timeline is None:
+            return None
+
+        render_job_id = None
+        original_mode = None
+        original_format = None
+        original_page = self._get_current_page_name()
+        restore_page = original_page or fallback_restore_page
+
+        try:
+            try:
+                original_mode = project.GetCurrentRenderMode()
+            except Exception:
+                original_mode = None
+
+            try:
+                original_format = project.GetCurrentRenderFormatAndCodec()
+            except Exception:
+                original_format = None
+
+            self._open_resolve_page("deliver")
+
+            loaded_preset = self._load_render_preset_for_audio(project)
+            if loaded_preset:
+                logger.info("Loaded render preset for timeline audio fallback: %s", loaded_preset)
+
+            selection = self._pick_audio_render_format_and_codec(project)
+            if selection is None:
+                return None
+
+            format_key, extension, codec = selection
+            logger.info(
+                "Using render format for timeline audio fallback: %s/%s",
+                format_key,
+                codec or "default",
+            )
+            if codec is not None:
+                project.SetCurrentRenderFormatAndCodec(format_key, codec)
+
+            output_dir = settings.temp_dir / "resolve-renders"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            render_name = f"{name_prefix}_{int(time.time() * 1000)}"
+            expected_output = Path(output_dir) / f"{render_name}.{extension}"
+
+            if original_mode is not None:
+                try:
+                    project.SetCurrentRenderMode(1)
+                except Exception:
+                    pass
+
+            render_settings = {
+                "TargetDir": str(output_dir),
+                "CustomName": render_name,
+            }
+            if mark_in_frame is not None and mark_out_frame is not None and int(mark_out_frame) >= int(mark_in_frame):
+                render_settings["MarkIn"] = int(mark_in_frame)
+                render_settings["MarkOut"] = int(mark_out_frame)
+            else:
+                render_settings["SelectAllFrames"] = 1
+            if format_key in {"mov", "mp4", "mxf"}:
+                render_settings["ExportVideo"] = 0
+                render_settings["ExportAudio"] = 1
+
+            if not project.SetRenderSettings(render_settings):
+                minimal_settings = {
+                    "TargetDir": str(output_dir),
+                    "CustomName": render_name,
+                }
+                if not project.SetRenderSettings(minimal_settings):
+                    logger.warning(
+                        "Resolve rejected timeline audio render settings for format=%s codec=%s: %s",
+                        format_key,
+                        codec or "default",
+                        render_settings,
+                    )
+                    return None
+
+            render_job_id = project.AddRenderJob()
+            if not render_job_id:
+                logger.warning("Resolve did not create a render job for timeline audio fallback")
+                return None
+
+            if not project.StartRendering(render_job_id):
+                logger.warning("Resolve refused to start timeline audio render job %s", render_job_id)
+                return None
+
+            deadline = time.time() + 180.0
+            while project.IsRenderingInProgress():
+                if time.time() >= deadline:
+                    try:
+                        project.StopRendering()
+                    except Exception:
+                        pass
+                    logger.warning("Timed out waiting for timeline audio render job %s", render_job_id)
+                    return None
+                time.sleep(0.25)
+
+            status = project.GetRenderJobStatus(render_job_id) or {}
+            candidate_paths = [expected_output]
+            candidate_paths.extend(sorted(output_dir.glob(f"{render_name}*")))
+            for candidate in candidate_paths:
+                try:
+                    if candidate.is_file() and candidate.stat().st_size > 0:
+                        logger.info(
+                            "Rendered timeline audio fallback using %s/%s -> %s",
+                            format_key,
+                            codec or "default",
+                            candidate,
+                        )
+                        return str(candidate)
+                except Exception:
+                    continue
+
+            logger.warning("Timeline audio render finished without an output file: %s", status)
+            return None
+        except Exception as exc:
+            logger.warning("Timeline audio render fallback failed: %s", exc)
+            return None
+        finally:
+            if render_job_id:
+                try:
+                    project.DeleteRenderJob(render_job_id)
+                except Exception:
+                    pass
+
+            if original_mode is not None:
+                try:
+                    project.SetCurrentRenderMode(original_mode)
+                except Exception:
+                    pass
+
+            if isinstance(original_format, dict):
+                format_name = original_format.get("format")
+                codec_name = original_format.get("codec")
+                if format_name and codec_name:
+                    try:
+                        project.SetCurrentRenderFormatAndCodec(str(format_name), str(codec_name))
+                    except Exception:
+                        pass
+
+            self._restore_resolve_page(restore_page)
 
     def get_clip_file_path(self, timeline_item) -> str | None:
         """Get the source file path for a timeline item."""

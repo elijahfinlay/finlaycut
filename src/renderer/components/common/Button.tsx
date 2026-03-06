@@ -14,10 +14,12 @@ export function Button({
   className,
   children,
   disabled,
+  type,
   ...props
 }: ButtonProps) {
   return (
     <button
+      type={type ?? 'button'}
       className={clsx(
         'font-medium rounded-lg transition-all duration-200 inline-flex items-center justify-center gap-2 whitespace-nowrap shrink-0 max-w-full',
         'disabled:opacity-50 disabled:cursor-not-allowed',

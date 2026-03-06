@@ -112,7 +112,7 @@ export function TranscriptEditor() {
     eta: speakerEta,
   } = useProgress('diarization')
   const abortRef = useRef<AbortController | null>(null)
-  const activeWordRef = useRef<HTMLSpanElement | null>(null)
+  const activeWordRef = useRef<HTMLSpanElement>(null)
   const transcriptContainerRef = useRef<HTMLDivElement | null>(null)
   const lastClickTimeRef = useRef<number>(0)
   const pendingAutoDetectRef = useRef(false)
@@ -777,6 +777,7 @@ export function TranscriptEditor() {
   // Spacebar play/pause shortcut plus hold-key click modes for cut/mute/keep.
   const lastSpaceRef = useRef<number>(0)
   const arrowDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const waveformSeekDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     if (words.length === 0) return
 
@@ -1388,6 +1389,46 @@ export function TranscriptEditor() {
           return { ...word, action: 'cut' as WordAction }
         })
 
+      // Propagate waveform-refined detection boundaries to word timestamps.
+      // Only API-sourced detections (ranges) have waveform refinement — not heuristic ones.
+      // We must replace entries with copies before mutating to avoid mutating React state.
+      const fps = parseFloat(framerate) || 24
+      for (const range of ranges) {
+        const overlappingIndices: number[] = []
+        for (let i = 0; i < nextWords.length; i++) {
+          const w = nextWords[i]
+          if (w.action === 'cut' && !isAnalysisMarker(w) && wordOverlapsSegment(w, range)) {
+            overlappingIndices.push(i)
+          }
+        }
+        if (overlappingIndices.length === 0) continue
+
+        const firstIdx = overlappingIndices[0]
+        const lastIdx = overlappingIndices[overlappingIndices.length - 1]
+
+        if (range.start !== nextWords[firstIdx].start) {
+          const first = { ...nextWords[firstIdx] }
+          const delta = first.start - range.start
+          const deltaFrames = Math.round(delta * fps)
+          first.start = Number(range.start.toFixed(4))
+          if (typeof first.start_frame === 'number') first.start_frame -= deltaFrames
+          if (typeof first.source_start_frame === 'number') first.source_start_frame -= deltaFrames
+          first.boundary_refined = true
+          nextWords[firstIdx] = first
+        }
+
+        if (range.end !== nextWords[lastIdx].end) {
+          const last = { ...nextWords[lastIdx] }
+          const delta = range.end - last.end
+          const deltaFrames = Math.round(delta * fps)
+          last.end = Number(range.end.toFixed(4))
+          if (typeof last.end_frame === 'number') last.end_frame += deltaFrames
+          if (typeof last.source_end_frame === 'number') last.source_end_frame += deltaFrames
+          last.boundary_refined = true
+          nextWords[lastIdx] = last
+        }
+      }
+
       const fillerMarkers = detections
         .filter((detection: any) => detection?.kind === 'audio_hesitation')
         .filter((detection: any) => {
@@ -1893,7 +1934,7 @@ export function TranscriptEditor() {
     }
   }
 
-  const handleWaveformClick = async (seconds: number) => {
+  const handleWaveformClick = (seconds: number) => {
     // Immediately snap local playhead so the UI feels instant
     lastClickTimeRef.current = Date.now()
     playheadSampleRef.current = { seconds, sampledAt: performance.now() }
@@ -1901,14 +1942,15 @@ export function TranscriptEditor() {
     setIsFollowing(false)
     setActiveWordIndex(findActiveWordIndex(words, seconds))
 
-    try {
-      await apiFetch('/api/resolve/playhead', {
+    // Debounced Resolve seek — only send final position (prevents flooding during drag)
+    if (waveformSeekDebounceRef.current) clearTimeout(waveformSeekDebounceRef.current)
+    waveformSeekDebounceRef.current = setTimeout(() => {
+      waveformSeekDebounceRef.current = null
+      apiFetch('/api/resolve/playhead', {
         method: 'POST',
-        body: JSON.stringify({ seconds }),
-      })
-    } catch {
-      // Silently fail
-    }
+        body: JSON.stringify({ seconds: playheadSampleRef.current.seconds }),
+      }).catch(() => {})
+    }, 80)
   }
 
   const fileInputRef = useRef<HTMLInputElement>(null)

@@ -35,7 +35,7 @@ class AudioService:
         self._model_name = settings.whisper_model
         self._device = settings.whisper_device
         self._compute_type = settings.whisper_compute_type
-        self._transcript_cache_version = "v5_hesitations"
+        self._transcript_cache_version = "v7_onset_refine"
 
     def _get_cache_key(self, audio_path: str, language: str | None = None) -> str:
         """Generate a cache key based on file path and modification time."""
@@ -134,7 +134,7 @@ class AudioService:
                 asr_options=asr_opts,
             )
         self._model_name = name
-        self._transcript_cache_version = "v5_hesitations"  # Bust old caches
+        self._transcript_cache_version = "v7_onset_refine"  # Bust old caches
         logger.info("WhisperX model loaded: %s (filler word detection enabled)", name)
 
     def _load_align_model(self, language_code: str):
@@ -181,21 +181,67 @@ class AudioService:
         detected_language = result.get("language", language or "en")
 
         # Step 2: Forced alignment for precise word timestamps
-        try:
-            self._load_align_model(detected_language)
-            result = whisperx.align(
-                result["segments"],
-                self._align_model,
-                self._align_metadata,
-                audio,
-                self._device,
-                return_char_alignments=False,
+        alignment_method = settings.alignment_method
+        if alignment_method == "mms_fa":
+            try:
+                from services.alignment_service import get_alignment_service
+                align_svc = get_alignment_service()
+                # Convert result segments into alignment-friendly format
+                pre_segments = self._convert_result(result, detected_language)
+                aligned_segments = align_svc.align_segments(
+                    audio_path, pre_segments["segments"],
+                )
+                pre_segments["segments"] = aligned_segments
+                # Flatten words from aligned segments
+                pre_segments["words"] = []
+                for seg in aligned_segments:
+                    pre_segments["words"].extend(seg.get("words", []))
+                # Waveform refinement
+                if settings.alignment_waveform_refine:
+                    pre_segments = self._refine_word_boundaries(audio_path, pre_segments)
+                transcript = pre_segments
+                logger.info("MMS_FA forced alignment complete")
+            except Exception as e:
+                logger.warning("MMS_FA alignment failed (%s), falling back to whisperx", e)
+                whisperx_ok = False
+                try:
+                    self._load_align_model(detected_language)
+                    result = whisperx.align(
+                        result["segments"],
+                        self._align_model,
+                        self._align_metadata,
+                        audio,
+                        self._device,
+                        return_char_alignments=False,
+                    )
+                    logger.info("WhisperX fallback alignment complete")
+                    whisperx_ok = True
+                except Exception as e2:
+                    logger.warning("WhisperX alignment also failed (%s), using raw timestamps", e2)
+                transcript = self._convert_result(result, detected_language)
+                self._mark_words_alignment_method(
+                    transcript, "whisperx" if whisperx_ok else "fallback"
+                )
+        else:
+            whisperx_ok = False
+            try:
+                self._load_align_model(detected_language)
+                result = whisperx.align(
+                    result["segments"],
+                    self._align_model,
+                    self._align_metadata,
+                    audio,
+                    self._device,
+                    return_char_alignments=False,
+                )
+                logger.info("WhisperX forced alignment complete")
+                whisperx_ok = True
+            except Exception as e:
+                logger.warning("Forced alignment failed (%s), using raw timestamps", e)
+            transcript = self._convert_result(result, detected_language)
+            self._mark_words_alignment_method(
+                transcript, "whisperx" if whisperx_ok else "fallback"
             )
-            logger.info("Forced alignment complete")
-        except Exception as e:
-            logger.warning("Forced alignment failed (%s), using raw timestamps", e)
-
-        transcript = self._convert_result(result, detected_language)
 
         # Cache the result
         if use_cache:
@@ -270,22 +316,49 @@ class AudioService:
 
                 detected_language = result.get("language", language or "en")
 
-                # Step 2: Forced alignment
-                try:
-                    self._load_align_model(detected_language)
-                    result = whisperx.align(
-                        result["segments"],
-                        self._align_model,
-                        self._align_metadata,
-                        audio,
-                        self._device,
-                        return_char_alignments=False,
-                    )
-                    logger.info("Forced alignment complete")
-                except Exception as e:
-                    logger.warning("Forced alignment failed (%s), using raw timestamps", e)
+                # Step 2: Forced alignment (MMS_FA or WhisperX)
+                alignment_method = settings.alignment_method
+                used_mms_fa = False
+                if alignment_method == "mms_fa":
+                    try:
+                        from services.alignment_service import get_alignment_service
+                        align_svc = get_alignment_service()
+                        # Convert to intermediate format for alignment
+                        pre_transcript = self._convert_result(result, detected_language)
+                        aligned_segments = align_svc.align_segments(
+                            audio_path, pre_transcript["segments"],
+                        )
+                        pre_transcript["segments"] = aligned_segments
+                        pre_transcript["words"] = []
+                        for seg in aligned_segments:
+                            pre_transcript["words"].extend(seg.get("words", []))
+                        # Waveform refinement
+                        if settings.alignment_waveform_refine:
+                            pre_transcript = self._refine_word_boundaries(audio_path, pre_transcript)
+                        result_holder[0] = (pre_transcript, detected_language, True, "mms_fa")
+                        used_mms_fa = True
+                        logger.info("MMS_FA forced alignment complete")
+                    except Exception as e:
+                        logger.warning("MMS_FA alignment failed (%s), falling back to whisperx", e)
 
-                result_holder[0] = (result, detected_language)
+                if not used_mms_fa:
+                    whisperx_ok = False
+                    try:
+                        self._load_align_model(detected_language)
+                        result = whisperx.align(
+                            result["segments"],
+                            self._align_model,
+                            self._align_metadata,
+                            audio,
+                            self._device,
+                            return_char_alignments=False,
+                        )
+                        logger.info("WhisperX forced alignment complete")
+                        whisperx_ok = True
+                    except Exception as e:
+                        logger.warning("Forced alignment failed (%s), using raw timestamps", e)
+                    fallback_method = "whisperx" if whisperx_ok else "fallback"
+                    result_holder[0] = (result, detected_language, False, fallback_method)
             except Exception as e:
                 error_holder[0] = e
             finally:
@@ -336,8 +409,14 @@ class AudioService:
         if progress_fn:
             await progress_fn(0.88, "Processing results...")
 
-        result, detected_language = result_holder[0]
-        transcript = self._convert_result(result, detected_language)
+        result_or_transcript, detected_language, was_mms_fa, align_method = result_holder[0]
+
+        if was_mms_fa:
+            # Already converted + aligned inside the thread
+            transcript = result_or_transcript
+        else:
+            transcript = self._convert_result(result_or_transcript, detected_language)
+            self._mark_words_alignment_method(transcript, align_method)
 
         # Cache the result
         if use_cache:
@@ -453,6 +532,132 @@ class AudioService:
                 transcript["words"].append(word_data)
 
             transcript["segments"].append(seg_data)
+
+        return transcript
+
+    @staticmethod
+    def _mark_words_alignment_method(transcript: dict, method: str):
+        """Tag all words in a transcript with an alignment method."""
+        for word in transcript.get("words", []):
+            if "alignment_method" not in word:
+                word["alignment_method"] = method
+        for seg in transcript.get("segments", []):
+            for word in seg.get("words", []):
+                if "alignment_method" not in word:
+                    word["alignment_method"] = method
+
+    def _refine_word_boundaries(self, audio_path: str, transcript: dict) -> dict:
+        """Apply waveform onset/offset detection + zero-crossing snap to all words.
+
+        Reuses the existing spectral profile and boundary refinement code
+        (previously only used for filler words) to polish every word boundary.
+        """
+        words = transcript.get("words", [])
+        if not words:
+            return transcript
+
+        profile = self.build_waveform_profile(audio_path, sample_rate=16000, hop_ms=5)
+        if profile is None:
+            return transcript
+
+        try:
+            y_raw = load_audio_np(audio_path, sr=16000)
+        except Exception:
+            y_raw = None
+
+        times = profile["times"]
+        rms = profile["rms"]
+        duration = float(profile["duration"])
+        hop_seconds = float(profile["hop_seconds"])
+
+        # Smooth RMS for onset/offset detection
+        smooth_k = max(3, int(round(0.015 / max(hop_seconds, 1e-6))))
+        kernel = np.ones(smooth_k, dtype=np.float32) / float(smooth_k)
+        rms_smooth = np.convolve(rms, kernel, mode="same").astype(np.float32)
+
+        search_window_s = 0.180  # 180ms search window for word boundaries
+
+        for i, word in enumerate(words):
+            try:
+                start = float(word.get("start", 0))
+                end = float(word.get("end", 0))
+            except (TypeError, ValueError):
+                continue
+            if end <= start or start < 0:
+                continue
+
+            # Neighbor boundaries for clamping
+            prev_end = float(words[i - 1].get("end", 0)) if i > 0 else 0.0
+            next_start = float(words[i + 1].get("start", duration)) if i < len(words) - 1 else duration
+
+            # --- Onset refinement (search backward from word start) ---
+            backward_limit = max(prev_end, start - search_window_s)
+            onset_search = np.where((times >= backward_limit) & (times <= start))[0]
+            new_start = start
+            if onset_search.size >= 2:
+                local_rms = rms_smooth[onset_search]
+                noise_ref = float(np.percentile(local_rms, 30))
+                onset_threshold = max(noise_ref * 2.5, noise_ref + 0.003)
+                above = np.where(local_rms > onset_threshold)[0]
+                if above.size > 0:
+                    candidate = float(times[onset_search[above[0]]])
+                    if candidate < start:
+                        new_start = candidate
+
+            # --- Offset refinement (search forward from word end) ---
+            forward_limit = min(next_start, end + search_window_s)
+            offset_search = np.where((times >= end) & (times <= forward_limit))[0]
+            new_end = end
+            if offset_search.size >= 2:
+                local_rms = rms_smooth[offset_search]
+                noise_ref = float(np.percentile(local_rms, 30))
+                offset_threshold = max(noise_ref * 2.5, noise_ref + 0.003)
+                above = np.where(local_rms > offset_threshold)[0]
+                if above.size > 0:
+                    candidate = float(times[offset_search[above[-1]]]) + hop_seconds
+                    if candidate > end:
+                        new_end = candidate
+
+            # --- Zero-crossing snap ---
+            if y_raw is not None and y_raw.size > 0:
+                sr = 16000
+                s_sample = max(0, min(len(y_raw) - 1, int(round(new_start * sr))))
+                e_sample = max(0, min(len(y_raw) - 1, int(round(new_end * sr))))
+                new_start = self._find_nearest_zero_crossing(y_raw, s_sample, sr=sr) / sr
+                new_end = self._find_nearest_zero_crossing(y_raw, e_sample, sr=sr) / sr
+
+            # --- Clamp to neighbors ---
+            new_start = max(prev_end, max(0.0, new_start))
+            new_end = min(next_start, min(duration, new_end))
+
+            if new_end <= new_start:
+                # Refinement squeezed the word to nothing, but still fix
+                # any cross-segment overlap by clamping start to prev_end
+                if start < prev_end:
+                    word["start"] = round(prev_end, 4)
+                    word["end"] = round(max(prev_end + 0.001, end), 4)
+                continue
+
+            word["start"] = round(new_start, 4)
+            word["end"] = round(max(new_start + 0.001, new_end), 4)
+            word["boundary_refined"] = True
+
+        # Global overlap-fix pass — ensure monotonic timestamps across all words
+        # (catches any cross-segment overlaps not handled by per-word clamping)
+        for i in range(1, len(words)):
+            prev_end = float(words[i - 1].get("end", 0))
+            curr_start = float(words[i].get("start", 0))
+            if curr_start < prev_end:
+                mid = round((prev_end + curr_start) / 2.0, 4)
+                words[i - 1]["end"] = mid
+                words[i]["start"] = mid
+
+        # Update segment boundaries to match refined words
+        for seg in transcript.get("segments", []):
+            seg_words = seg.get("words", [])
+            if seg_words:
+                seg["start"] = seg_words[0].get("start", seg.get("start"))
+                seg["end"] = seg_words[-1].get("end", seg.get("end"))
 
         return transcript
 
@@ -1233,7 +1438,7 @@ class AudioService:
             # --- Stage 1a: Find true onset (backward search via RMS threshold) ---
             backward_limit = max(0.0, start - search_window_s)
             if prev_word_end is not None:
-                backward_limit = max(backward_limit, prev_word_end - 0.15)
+                backward_limit = max(backward_limit, prev_word_end)
 
             onset_search = np.where((times >= backward_limit) & (times <= start))[0]
             new_start = start
@@ -1496,7 +1701,7 @@ class AudioService:
             search_start = max(0.0, start - 0.20)
             search_end = min(duration, end + 0.20)
             if prev_word_end is not None:
-                search_start = max(search_start, prev_word_end - 0.15)
+                search_start = max(search_start, prev_word_end)
             if next_word_start is not None:
                 search_end = min(search_end, next_word_start)
 
@@ -1589,7 +1794,7 @@ class AudioService:
                 component_start = max(search_start, float(continuation_interval[0]))
                 component_end = min(search_end, float(continuation_interval[1]))
 
-            left_bound = max(search_start, prev_word_end - 0.15) if prev_word_end is not None else search_start
+            left_bound = max(search_start, prev_word_end) if prev_word_end is not None else search_start
             right_bound = min(search_end, next_word_start) if next_word_start is not None else search_end
 
             # --- Direct RMS onset correction ---
@@ -1643,6 +1848,14 @@ class AudioService:
                 # Re-clamp after zero-crossing snap
                 snapped_start = max(left_bound, snapped_start)
                 snapped_end = min(right_bound, snapped_end)
+
+            # Refinement can expand the seed but should never trim inside the
+            # original filler span once neighbor-word bounds are applied.
+            seed_start = max(left_bound, start)
+            seed_end = min(right_bound, end)
+            if seed_end > seed_start:
+                snapped_start = max(left_bound, min(snapped_start, seed_start))
+                snapped_end = min(right_bound, max(snapped_end, seed_end))
 
             if snapped_end - snapped_start < (min_duration_ms / 1000.0):
                 refined_segments.append(fallback_seg)

@@ -90,10 +90,9 @@ async def annotate_transcript_speakers(request: TranscriptSpeakerRequest):
     if timeline is None:
         return {"error": "No active timeline"}
 
-    clips = resolve_service.get_timeline_clips("audio", 1)
-    if not clips:
-        clips = resolve_service.get_timeline_clips("video", 1)
-    if not clips:
+    clip_selection = resolve_service.get_timeline_audio_clip_contexts()
+    clip_contexts = clip_selection["contexts"]
+    if not clip_selection["has_any_items"]:
         return {"error": "No clips found in timeline"}
 
     fps_str = timeline.GetSetting("timelineFrameRate")
@@ -104,44 +103,45 @@ async def annotate_transcript_speakers(request: TranscriptSpeakerRequest):
 
     try:
         await manager.send_progress("diarization", 0.04, "Extracting timeline audio...")
+        if not clip_contexts:
+            logger.warning("Speaker analysis found no usable clip sources: %s", clip_selection["attempts"])
+            assembled_audio = resolve_service.render_current_timeline_audio(
+                "finlaycut_diarization",
+                fallback_restore_page="edit",
+            )
+            if not assembled_audio:
+                return {"error": "Could not extract timeline audio for speaker analysis"}
+        else:
+            audio_cache: dict[str, str] = {}
+            clip_segments: list[dict] = []
 
-        audio_cache: dict[str, str] = {}
-        clip_segments: list[dict] = []
+            for index, clip_context in enumerate(clip_contexts):
+                file_path = str(clip_context["file_path"])
+                if file_path not in audio_cache:
+                    audio_cache[file_path] = extract_audio(file_path)
+                full_audio = audio_cache[file_path]
 
-        for index, clip in enumerate(clips):
-            file_path = resolve_service.get_clip_file_path(clip)
-            if not file_path:
-                continue
+                audio_path = full_audio
+                if clip_context.get("source_start_seconds") is not None and clip_context.get("source_end_seconds") is not None:
+                    try:
+                        audio_path = extract_audio_segment(
+                            full_audio,
+                            float(clip_context["source_start_seconds"]),
+                            float(clip_context["source_end_seconds"]),
+                        )
+                    except Exception as e:
+                        logger.warning("Speaker segment extraction failed for clip %d (%s)", index, e)
 
-            clip_context = resolve_service.get_clip_audio_context(clip)
-            if clip_context is None:
-                continue
+                clip_segments.append({
+                    "audio_path": audio_path,
+                    "timeline_start_seconds": float(clip_context["clip_timeline_offset"]),
+                    "duration_seconds": float(clip_context["clip_duration_seconds"]),
+                })
 
-            if file_path not in audio_cache:
-                audio_cache[file_path] = extract_audio(file_path)
-            full_audio = audio_cache[file_path]
+            if not clip_segments:
+                return {"error": "Could not extract timeline audio for speaker analysis"}
 
-            audio_path = full_audio
-            if clip_context.get("source_start_seconds") is not None and clip_context.get("source_end_seconds") is not None:
-                try:
-                    audio_path = extract_audio_segment(
-                        full_audio,
-                        float(clip_context["source_start_seconds"]),
-                        float(clip_context["source_end_seconds"]),
-                    )
-                except Exception as e:
-                    logger.warning("Speaker segment extraction failed for clip %d (%s)", index, e)
-
-            clip_segments.append({
-                "audio_path": audio_path,
-                "timeline_start_seconds": float(clip_context["clip_timeline_offset"]),
-                "duration_seconds": float(clip_context["clip_duration_seconds"]),
-            })
-
-        if not clip_segments:
-            return {"error": "Could not extract timeline audio for speaker analysis"}
-
-        assembled_audio = assemble_timeline_audio(clip_segments, timeline_duration_seconds)
+            assembled_audio = assemble_timeline_audio(clip_segments, timeline_duration_seconds)
 
         async def progress_fn(pct, msg):
             scaled = 0.10 + pct * 0.78

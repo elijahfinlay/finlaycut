@@ -13,6 +13,9 @@ class Word(BaseModel):
     speaker: Optional[str] = None
     speaker_index: Optional[int] = None
     probability: float = 1.0
+    alignment_confidence: Optional[float] = None  # CTC score 0-1
+    alignment_method: Optional[str] = None        # "mms_fa" | "whisperx" | "fallback"
+    boundary_refined: Optional[bool] = None       # True if waveform-refined
 
 
 class Segment(BaseModel):

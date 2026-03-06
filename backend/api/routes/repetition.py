@@ -1,7 +1,9 @@
 """Repetition/take detection and removal endpoints."""
 
 import logging
+from typing import Optional
 from fastapi import APIRouter
+from pydantic import BaseModel
 from services.resolve_service import resolve_service
 from services.audio_service import audio_service
 from services.ai_service import ai_service
@@ -12,6 +14,24 @@ from api.websocket import manager
 logger = logging.getLogger("finlaycut.repetition")
 
 router = APIRouter()
+
+
+class RepetitionDetectRequest(BaseModel):
+    transcript: Optional[dict] = None
+
+
+def _take_to_frame_range(take: dict, timeline_start_frame: int, fps: float) -> tuple[int, int]:
+    start_frame = take.get("start_frame")
+    end_frame = take.get("end_frame")
+    if isinstance(start_frame, (int, float)) and isinstance(end_frame, (int, float)):
+        return int(start_frame), int(end_frame)
+
+    start_seconds = float(take.get("start", 0))
+    end_seconds = float(take.get("end", 0))
+    return (
+        int(timeline_start_frame) + int(round(start_seconds * float(fps))),
+        int(timeline_start_frame) + int(round(end_seconds * float(fps))),
+    )
 
 
 def _merge_frame_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -70,8 +90,21 @@ def _frame_range_to_segment(start_frame: int, end_frame: int, timeline_start_fra
 
 @router.post("/detect")
 @heavy_operation("Repetition Detection")
-async def detect_repetitions():
+async def detect_repetitions(request: RepetitionDetectRequest = RepetitionDetectRequest()):
     """Detect repeated takes in the timeline."""
+
+    # Path A: transcript provided — skip transcription entirely
+    if request.transcript is not None:
+        try:
+            await manager.send_progress("repetition", 0.5, "Detecting repetitions...")
+            groups = await ai_service.detect_repetitions(request.transcript)
+            await manager.send_progress("repetition", 1.0, f"Found {len(groups)} repeated sections")
+            return {"groups": groups, "count": len(groups)}
+        except Exception as e:
+            await manager.send_error("repetition", str(e))
+            return {"error": str(e)}
+
+    # Path B: no transcript — extract audio and transcribe
     clip = resolve_service.get_clip_at_playhead("audio", 1)
     if clip is None:
         clip = resolve_service.get_clip_at_playhead("video", 1)
@@ -109,13 +142,20 @@ async def detect_repetitions():
         await manager.send_progress("repetition", 0.6, "Detecting repetitions...")
         groups = await ai_service.detect_repetitions(transcript)
 
+        # Offset take timestamps to the timeline and derive frame-accurate ranges.
+        offset = clip_context.get("clip_timeline_offset", 0)
+        fps = float(clip_context.get("fps") or 24.0)
+        timeline_start_frame = int(clip_context.get("timeline_start_frame") or 0)
         for group in groups:
-            takes = group.get("takes", [])
-            for take in takes:
+            for take in group.get("takes", []):
                 if "start" in take:
-                    take["start"] += clip_context["clip_timeline_offset"]
+                    take["start"] += offset
                 if "end" in take:
-                    take["end"] += clip_context["clip_timeline_offset"]
+                    take["end"] += offset
+                if take.get("start_frame") is None and "start" in take:
+                    take["start_frame"] = timeline_start_frame + int(round(float(take["start"]) * fps))
+                if take.get("end_frame") is None and "end" in take:
+                    take["end_frame"] = timeline_start_frame + int(round(float(take["end"]) * fps))
 
         await manager.send_progress("repetition", 1.0, f"Found {len(groups)} repeated sections")
 
@@ -174,10 +214,7 @@ async def apply_repetition_removal(groups: list[dict]):
         return {"success": True, "message": "Nothing to remove"}
 
     cut_frame_ranges = _merge_frame_ranges([
-        (
-            tl_start + int(round(float(rem["start"]) * fps)),
-            tl_start + int(round(float(rem["end"]) * fps)),
-        )
+        _take_to_frame_range(rem, tl_start, fps)
         for rem in segments_to_remove
     ])
     kept_frame_ranges = _subtract_frame_ranges(tl_start, tl_end, cut_frame_ranges)
@@ -193,8 +230,11 @@ async def apply_repetition_removal(groups: list[dict]):
     total_removed = sum((end_frame - start_frame) / fps for start_frame, end_frame in cut_frame_ranges)
 
     from api.routes.undo import _record
-    _record("Repetition Removal", backup_name,
-            f"Removed {len(segments_to_remove)} takes ({total_removed:.1f}s)")
+    undo_entry = _record(
+        "Repetition Removal",
+        backup_name,
+        f"Removed {len(segments_to_remove)} takes ({total_removed:.1f}s)",
+    )
 
     return {
         "success": True,
@@ -202,5 +242,6 @@ async def apply_repetition_removal(groups: list[dict]):
         "total_removed_seconds": round(total_removed, 1),
         "backup_timeline": backup_name,
         "timeline_name": result.get("timeline_name"),
+        "undo_entry_id": undo_entry["id"],
         "message": f"Removed {len(cut_frame_ranges)} duplicate take sections ({total_removed:.1f}s) on the current timeline. Backup: {backup_name}"
     }

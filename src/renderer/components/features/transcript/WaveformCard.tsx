@@ -20,9 +20,10 @@ export interface WaveformCardProps {
 }
 
 function formatTimecodeWithFrames(seconds: number, fps: number): string {
+  const nominalFps = Math.round(fps)
   const totalFrames = Math.round(seconds * fps)
-  const f = totalFrames % fps
-  const totalSec = Math.floor(totalFrames / fps)
+  const f = totalFrames % nominalFps
+  const totalSec = Math.floor(totalFrames / nominalFps)
   const s = totalSec % 60
   const m = Math.floor(totalSec / 60) % 60
   const h = Math.floor(totalSec / 3600)
