@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FinlayCut — AI Video Editing for DaVinci Resolve</title>
+  <meta name="description" content="AI-powered video editing assistant for DaVinci Resolve. Transcription, silence removal, filler word detection, speaker diarization, and more.">
+  <meta property="og:title" content="FinlayCut">
+  <meta property="og:description" content="AI-powered video editing assistant for DaVinci Resolve">
+  <meta property="og:image" content="/assets/icon.png">
+  <link rel="icon" type="image/png" href="/assets/icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+  <!-- Film grain overlay -->
+  <div class="grain"></div>
+
+  <!-- Scanline overlay -->
+  <div class="scanlines"></div>
+
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="nav-inner">
+      <div class="nav-brand">
+        <img src="/assets/icon.png" alt="" class="nav-icon">
+        <span class="nav-name">FinlayCut</span>
+      </div>
+      <div class="nav-links">
+        <a href="#features">Features</a>
+        <a href="#requirements">Requirements</a>
+        <a href="https://github.com/elijahfinlay/finlaycut" target="_blank" rel="noopener">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="hero-bg">
+      <div class="hero-glow"></div>
+      <div class="timeline-lines">
+        <div class="tl-line tl-line-1"></div>
+        <div class="tl-line tl-line-2"></div>
+        <div class="tl-line tl-line-3"></div>
+        <div class="tl-line tl-line-4"></div>
+        <div class="tl-line tl-line-5"></div>
+      </div>
+    </div>
+    <div class="hero-content">
+      <div class="hero-badge">
+        <span class="badge-dot"></span>
+        macOS &middot; DaVinci Resolve
+      </div>
+      <div class="hero-icon-wrap">
+        <img src="/assets/icon.png" alt="FinlayCut" class="hero-icon">
+        <div class="icon-ring"></div>
+      </div>
+      <h1 class="hero-title">FINLAYCUT</h1>
+      <p class="hero-tagline">AI-powered video editing assistant<br>for DaVinci Resolve</p>
+      <div class="hero-actions">
+        <button class="btn-download" id="downloadBtn" onclick="handleDownload()">
+          <svg class="btn-icon" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M10 3v10m0 0l-3.5-3.5M10 13l3.5-3.5M4 16h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span id="downloadText">Download for macOS</span>
+        </button>
+        <span class="hero-version" id="versionTag">Checking latest release...</span>
+      </div>
+    </div>
+    <div class="hero-fade"></div>
+  </section>
+
+  <!-- Features -->
+  <section class="features" id="features">
+    <div class="section-inner">
+      <div class="section-header">
+        <span class="section-label">01 / CAPABILITIES</span>
+        <h2 class="section-title">EDIT SMARTER,<br>NOT LONGER</h2>
+      </div>
+      <div class="feature-grid">
+        <div class="feature-card">
+          <div class="feature-index">01</div>
+          <div class="feature-icon-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M12 18.5a6.5 6.5 0 100-13 6.5 6.5 0 000 13z"/>
+              <path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M19.07 4.93l-1.41 1.41M6.34 17.66l-1.41 1.41"/>
+            </svg>
+          </div>
+          <h3 class="feature-name">AI Transcription</h3>
+          <p class="feature-desc">WhisperX-powered transcription with word-level timestamps and forced alignment. Edit your video by editing text.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-index">02</div>
+          <div class="feature-icon-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M3 12h4l3-9 4 18 3-9h4"/>
+            </svg>
+          </div>
+          <h3 class="feature-name">Silence & Filler Removal</h3>
+          <p class="feature-desc">Automatically detect and cut dead air, "um"s, "uh"s, and filler words. Tighten your edit in seconds.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-index">03</div>
+          <div class="feature-icon-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M4 6h16M4 12h16M4 18h8"/>
+              <circle cx="18" cy="18" r="3"/>
+              <path d="M20.5 20.5L22 22"/>
+            </svg>
+          </div>
+          <h3 class="feature-name">Repetition Detection</h3>
+          <p class="feature-desc">Find repeated takes and stammered phrases automatically. Keep the best take, cut the rest.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-index">04</div>
+          <div class="feature-icon-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <circle cx="9" cy="9" r="4"/>
+              <circle cx="15" cy="15" r="4"/>
+              <path d="M12.5 8.5a4 4 0 010 7"/>
+            </svg>
+          </div>
+          <h3 class="feature-name">Speaker Diarization</h3>
+          <p class="feature-desc">Identify who's speaking when. Color-coded speakers in your transcript for multi-person content.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-index">05</div>
+          <div class="feature-icon-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <rect x="2" y="4" width="20" height="16" rx="2"/>
+              <path d="M2 10h20M8 4v16"/>
+            </svg>
+          </div>
+          <h3 class="feature-name">Scene Detection</h3>
+          <p class="feature-desc">Automatically detect scene changes and visual transitions. Navigate your footage by scene, not by scrubbing.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-index">06</div>
+          <div class="feature-icon-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M12 3v18M3 12h18M7.5 7.5l9 9M16.5 7.5l-9 9"/>
+            </svg>
+          </div>
+          <h3 class="feature-name">Resolve Integration</h3>
+          <p class="feature-desc">Native DaVinci Resolve API integration. Changes apply directly to your timeline — no exporting, no round-tripping.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- How it works -->
+  <section class="how-it-works">
+    <div class="section-inner">
+      <div class="section-header">
+        <span class="section-label">02 / WORKFLOW</span>
+        <h2 class="section-title">THREE STEPS.<br>THAT'S IT.</h2>
+      </div>
+      <div class="steps">
+        <div class="step">
+          <div class="step-num">1</div>
+          <div class="step-content">
+            <h3>Open FinlayCut</h3>
+            <p>Launch the app alongside DaVinci Resolve. It connects automatically via the Resolve scripting API.</p>
+          </div>
+        </div>
+        <div class="step-line"></div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <div class="step-content">
+            <h3>Analyze Your Timeline</h3>
+            <p>Transcribe, detect silence, find filler words, identify speakers — all with one click per feature.</p>
+          </div>
+        </div>
+        <div class="step-line"></div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <div class="step-content">
+            <h3>Apply Edits</h3>
+            <p>Review the suggestions, tweak if needed, then apply. FinlayCut makes the cuts directly in your Resolve timeline.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Requirements -->
+  <section class="requirements" id="requirements">
+    <div class="section-inner">
+      <div class="section-header">
+        <span class="section-label">03 / SETUP</span>
+        <h2 class="section-title">SYSTEM<br>REQUIREMENTS</h2>
+      </div>
+      <div class="req-grid">
+        <div class="req-card">
+          <div class="req-label">Operating System</div>
+          <div class="req-value">macOS 13 Ventura or later</div>
+          <div class="req-note">Apple Silicon & Intel supported</div>
+        </div>
+        <div class="req-card">
+          <div class="req-label">Video Editor</div>
+          <div class="req-value">DaVinci Resolve 18+</div>
+          <div class="req-note">Free or Studio edition</div>
+        </div>
+        <div class="req-card">
+          <div class="req-label">Disk Space</div>
+          <div class="req-value">~500 MB</div>
+          <div class="req-note">Includes bundled Python runtime & ffmpeg</div>
+        </div>
+        <div class="req-card">
+          <div class="req-label">Optional</div>
+          <div class="req-value">Ollama (for AI features)</div>
+          <div class="req-note">Local LLM for smart editing suggestions</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="cta">
+    <div class="section-inner">
+      <div class="cta-content">
+        <h2 class="cta-title">READY TO CUT<br>THE BORING PARTS?</h2>
+        <button class="btn-download btn-download-lg" onclick="handleDownload()">
+          <svg class="btn-icon" viewBox="0 0 20 20" fill="none">
+            <path d="M10 3v10m0 0l-3.5-3.5M10 13l3.5-3.5M4 16h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Download FinlayCut
+        </button>
+        <p class="cta-sub">Free &middot; Open Source &middot; macOS only</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="footer-inner">
+      <div class="footer-brand">
+        <img src="/assets/icon.png" alt="" class="footer-icon">
+        <span>FinlayCut</span>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/elijahfinlay/finlaycut" target="_blank" rel="noopener">Source Code</a>
+        <a href="https://github.com/elijahfinlay/finlaycut/issues" target="_blank" rel="noopener">Report Issue</a>
+        <a href="https://github.com/elijahfinlay/finlaycut/releases" target="_blank" rel="noopener">All Releases</a>
+      </div>
+      <div class="footer-copy">Built by Elijah Finlay</div>
+    </div>
+  </footer>
+
+  <script src="/script.js"></script>
+</body>
+</html>
