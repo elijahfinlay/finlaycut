@@ -23,8 +23,22 @@ const listeners = new Set<Listener>()
 let ws: WebSocket | null = null
 let wsConnected = false
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let interruptTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectDelay = 1000
 let pendingMessage: Record<string, unknown> | null = null
+
+function interruptRunningOperations() {
+  const store = useOperationStore.getState()
+  const running = Object.entries(store.operations)
+    .filter(([, op]) => op.status === 'running')
+    .map(([name]) => name)
+
+  if (running.length === 0) return
+
+  for (const operation of running) {
+    store.failOperation(operation, 'Connection to the backend was lost. The operation was interrupted.')
+  }
+}
 
 function connectWs() {
   try {
@@ -34,6 +48,10 @@ function connectWs() {
     ws.onopen = () => {
       wsConnected = true
       reconnectDelay = 1000 // reset on successful connect
+      if (interruptTimer) {
+        clearTimeout(interruptTimer)
+        interruptTimer = null
+      }
       if (pendingMessage) {
         ws!.send(JSON.stringify(pendingMessage))
         pendingMessage = null
@@ -70,6 +88,13 @@ function connectWs() {
     ws.onclose = () => {
       wsConnected = false
       ws = null
+      if (interruptTimer) clearTimeout(interruptTimer)
+      interruptTimer = setTimeout(() => {
+        interruptTimer = null
+        if (!wsConnected) {
+          interruptRunningOperations()
+        }
+      }, 1500)
       reconnectTimer = setTimeout(connectWs, reconnectDelay)
       reconnectDelay = Math.min(reconnectDelay * 2, 30000) // backoff: 1→2→4→8→...→30s
     }

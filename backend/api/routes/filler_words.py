@@ -1,11 +1,13 @@
 """Filler word detection and removal endpoints."""
 
 import logging
+import os
 from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Optional
 from services.resolve_service import resolve_service
 from services.audio_service import audio_service
+from services.audio_state import get_last_transcription_audio
 from utils.audio_utils import extract_audio, extract_audio_segment
 from utils.operation_queue import heavy_operation
 from utils.timeline_audio import assemble_current_timeline_audio
@@ -188,21 +190,110 @@ async def analyze_filler_words(request: FillerAnalyzeRequest = FillerAnalyzeRequ
     # If an existing transcript with words was provided, skip transcription entirely
     if request.transcript and request.transcript.get("words"):
         try:
-            await manager.send_progress("filler_words", 0.34, "Assembling timeline audio...")
-            assembled_audio, fps, timeline_start_frame, _timeline_end_frame = assemble_current_timeline_audio()
-            if not assembled_audio or fps is None or timeline_start_frame is None:
-                return {"error": "Could not assemble current timeline audio"}
+            timeline = resolve_service.get_current_timeline()
+            if timeline is None:
+                return {"error": "No active timeline"}
+            fps_str = timeline.GetSetting("timelineFrameRate")
+            fps = float(fps_str) if fps_str else 24.0
+            timeline_start_frame = int(timeline.GetStartFrame())
+            signature_info = resolve_service.get_timeline_signature()
+            current_timeline_signature = str(signature_info.get("timeline_signature") or "") if signature_info else ""
+
+            transcript_words = request.transcript.get("words") or []
+            transcript_start = min(
+                (float(word.get("start", 0.0)) for word in transcript_words),
+                default=0.0,
+            )
+            transcript_end = max(
+                (float(word.get("end", word.get("start", 0.0))) for word in transcript_words),
+                default=0.0,
+            )
+
+            # The cached audio may have an offset if it's a single-clip extraction
+            # (word timestamps are in timeline seconds, audio starts at offset=0).
+            # We need to subtract the offset from word times when analysing audio.
+            audio_offset = 0.0
+            assembled_audio = None
+            cached = get_last_transcription_audio()
+            if cached and os.path.exists(cached[0]):
+                cached_path, cached_duration, cached_offset, cached_signature, _cached_covers_full_timeline = cached
+                cache_start = float(cached_offset)
+                cache_end = cache_start + float(cached_duration)
+                signature_matches = (
+                    not current_timeline_signature
+                    or (cached_signature is not None and cached_signature == current_timeline_signature)
+                )
+                covers_transcript = (
+                    transcript_start >= cache_start - 0.05
+                    and transcript_end <= cache_end + 0.05
+                )
+                if signature_matches and covers_transcript:
+                    assembled_audio = cached_path
+                    audio_offset = cached_offset
+                    await manager.send_progress("filler_words", 0.34, "Using transcription audio...")
+                    logger.info(
+                        "Filler analysis using cached transcription audio (duration=%.2fs, offset=%.2fs, transcript_span=%.2fs-%.2fs)",
+                        cached_duration,
+                        cached_offset,
+                        transcript_start,
+                        transcript_end,
+                    )
+
+            if assembled_audio is None:
+                await manager.send_progress("filler_words", 0.34, "Assembling timeline audio...")
+                assembled_audio, assembled_fps, assembled_timeline_start_frame, _timeline_end_frame = assemble_current_timeline_audio()
+                if not assembled_audio or assembled_fps is None or assembled_timeline_start_frame is None:
+                    return {"error": "Could not assemble current timeline audio"}
+                fps = float(assembled_fps)
+                timeline_start_frame = int(assembled_timeline_start_frame)
+                audio_offset = 0.0
+                logger.info(
+                    "Filler analysis fell back to assembled timeline audio (transcript_end=%.2fs)",
+                    transcript_end,
+                )
+
+            # If there's an audio offset, shift word timestamps to audio-local time
+            # so that audio analysis functions look at the correct positions.
+            analysis_transcript = request.transcript
+            if audio_offset > 0.0:
+                shifted_words = []
+                for w in transcript_words:
+                    sw = dict(w)
+                    sw["start"] = float(sw.get("start", 0.0)) - audio_offset
+                    sw["end"] = float(sw.get("end", 0.0)) - audio_offset
+                    shifted_words.append(sw)
+                analysis_transcript = {"words": shifted_words}
+                logger.info(
+                    "Shifted %d word timestamps by -%.2fs for audio-local analysis",
+                    len(shifted_words),
+                    audio_offset,
+                )
 
             await manager.send_progress("filler_words", 0.58, "Detecting and refining fillers...")
             profile = audio_service.build_waveform_profile(assembled_audio)
             detections = audio_service.analyze_filler_candidates(
                 assembled_audio,
-                request.transcript,
+                analysis_transcript,
                 filler_words=request.filler_words,
                 profile=profile,
             )
+
+            # Shift detection timestamps back to timeline seconds before computing frames
+            if audio_offset > 0.0:
+                for detection in detections:
+                    for key in ("start", "end", "prev_word_end", "next_word_start"):
+                        val = _coerce_optional_float(detection.get(key))
+                        if val is not None:
+                            detection[key] = val + audio_offset
+
             for detection in detections:
                 _set_timeline_detection_frames(detection, timeline_start_frame, fps)
+            logger.info(
+                "Filler analysis complete: transcript_words=%d detections=%d audio_offset=%.2f",
+                len(transcript_words),
+                len(detections),
+                audio_offset,
+            )
         except Exception as e:
             logger.warning("Filler analysis skipped: %s", e)
             await manager.send_error("filler_words", str(e))

@@ -12,8 +12,12 @@ interface ProjectState {
   duration: number
   activeFeature: string
   sidebarCollapsed: boolean
+  hasPendingResolveChange: boolean
+  pendingProjectName: string | null
+  pendingTimelineName: string | null
   refreshResolve: (() => Promise<void>) | null
   setStatus: (status: any) => void
+  setPendingResolveChange: (status: any | null) => void
   setActiveFeature: (feature: string) => void
   setRefreshResolve: (fn: () => Promise<void>) => void
   toggleSidebar: () => void
@@ -31,6 +35,9 @@ export const useProjectStore = create<ProjectState>((set) => ({
   duration: 0,
   activeFeature: 'transcript',
   sidebarCollapsed: false,
+  hasPendingResolveChange: false,
+  pendingProjectName: null,
+  pendingTimelineName: null,
   refreshResolve: null,
   setRefreshResolve: (fn) => set({ refreshResolve: fn }),
   setStatus: (status) =>
@@ -44,6 +51,12 @@ export const useProjectStore = create<ProjectState>((set) => ({
       framerate: status.timeline?.framerate || '',
       resolution: status.timeline?.resolution || '',
       duration: status.timeline?.duration || 0
+    }),
+  setPendingResolveChange: (status) =>
+    set({
+      hasPendingResolveChange: Boolean(status?.connected),
+      pendingProjectName: status?.project?.name || null,
+      pendingTimelineName: status?.timeline?.name || null,
     }),
   setActiveFeature: (feature) => set({ activeFeature: feature }),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),

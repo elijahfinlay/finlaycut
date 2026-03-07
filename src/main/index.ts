@@ -30,6 +30,7 @@ process.stderr?.on('error', (err) => {
 
 let mainWindow: BrowserWindow | null = null
 let pythonManager: PythonManager | null = null
+let appQuitting = false
 
 function blockReloadShortcuts(window: BrowserWindow): void {
   window.webContents.on('before-input-event', (event, input) => {
@@ -65,6 +66,31 @@ function createWindow(): void {
 
   mainWindow.on('ready-to-show', () => {
     mainWindow?.show()
+  })
+
+  mainWindow.webContents.on('render-process-gone', (_, details) => {
+    try {
+      console.error('[FinlayCut] Renderer process exited:', details.reason)
+    } catch {
+      // Ignore logging failures.
+    }
+
+    if (appQuitting) {
+      return
+    }
+
+    const crashedWindow = mainWindow
+    mainWindow = null
+
+    if (crashedWindow && !crashedWindow.isDestroyed()) {
+      crashedWindow.destroy()
+    }
+
+    setTimeout(() => {
+      if (!appQuitting && BrowserWindow.getAllWindows().length === 0) {
+        createWindow()
+      }
+    }, 250)
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
@@ -135,6 +161,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', async () => {
+  appQuitting = true
   if (pythonManager && !pythonStopped) {
     pythonStopped = true
     await pythonManager.stop()

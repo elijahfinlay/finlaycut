@@ -19,14 +19,29 @@ class ConnectionManager:
     def disconnect(self, websocket: WebSocket):
         self.active_connections.discard(websocket)
 
+    async def _send_json_with_timeout(self, connection: WebSocket, message: dict) -> bool:
+        try:
+            await asyncio.wait_for(connection.send_json(message), timeout=0.75)
+            return True
+        except Exception:
+            return False
+
     async def broadcast(self, message: dict):
         """Send a message to all connected clients."""
-        dead = set()
-        for connection in self.active_connections:
-            try:
-                await connection.send_json(message)
-            except Exception:
-                dead.add(connection)
+        if not self.active_connections:
+            return
+
+        connections = list(self.active_connections)
+        results = await asyncio.gather(
+            *(self._send_json_with_timeout(connection, message) for connection in connections),
+            return_exceptions=True,
+        )
+
+        dead = {
+            connection
+            for connection, result in zip(connections, results)
+            if result is not True
+        }
         self.active_connections -= dead
 
     async def send_progress(self, operation: str, progress: float, message: str = ""):

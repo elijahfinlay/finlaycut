@@ -32,7 +32,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   silenceMinDurationMs: 300,
   silenceMinDurationFrames: 14,
   silencePaddingMs: 100,
-  fillerWords: ['um', 'uh', 'uh-huh', 'uhh', 'uhm', 'umm', 'hmm', 'mmhmm', 'mhm', 'mm', 'huh', 'er', 'erm', 'ah', 'ahh'],
+  fillerWords: ['um', 'uh', 'uhm', 'umm', 'uhh'],
   cacheLimitGb: 2.0,
   backupRetentionDays: 30,
   _initialized: false,

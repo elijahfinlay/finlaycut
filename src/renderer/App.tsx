@@ -17,7 +17,7 @@ import { SettingsPanel } from './components/features/SettingsPanel'
 import { UndoHistory } from './components/features/UndoHistory'
 import { ExportPanel } from './components/features/ExportPanel'
 import { SceneDetector } from './components/features/SceneDetector'
-import { useResolveStatus } from './hooks/useResolveStatus'
+import { type ResolveStatus, useResolveStatus } from './hooks/useResolveStatus'
 import { useProjectStore } from './stores/projectStore'
 import { useFeatureDataStore } from './stores/featureDataStore'
 import { useOperationStore } from './stores/operationStore'
@@ -26,6 +26,14 @@ import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts'
 import { Onboarding } from './components/features/Onboarding'
 
 const ONBOARDING_KEY = 'finlaycut-onboarding-complete'
+
+function getResolveStatusKey(status: ResolveStatus | null | undefined): string | null {
+  if (!status?.connected) return null
+  const projectName = status.project?.name
+  const timelineName = status.timeline?.name
+  if (!projectName || !timelineName) return null
+  return `${projectName}::${timelineName}`
+}
 
 const FEATURE_MAP: Record<string, React.ComponentType> = {
   transcript: TranscriptEditor,
@@ -48,10 +56,20 @@ const FEATURE_MAP: Record<string, React.ComponentType> = {
 
 export default function App() {
   const { status, refresh } = useResolveStatus()
-  const { setStatus, setRefreshResolve, activeFeature } = useProjectStore()
-  const { clearAll } = useFeatureDataStore()
+  const {
+    setStatus,
+    setRefreshResolve,
+    setPendingResolveChange,
+    activeFeature,
+  } = useProjectStore()
+  const { clearAll, clearNonTranscriptData, transcriptSession, transcriptWords } = useFeatureDataStore()
+  const transcriptionRunning = useOperationStore(
+    (s) => s.operations.transcript_editor?.status === 'running'
+  )
   const initSettings = useSettingsStore((s) => s.initSettings)
   const timelineKeyRef = useRef<string | null>(null)
+  const statusOverrideRef = useRef(status)
+  const [statusOverride, setStatusOverride] = useState(status)
   const [showOnboarding, setShowOnboarding] = useState(
     () => !localStorage.getItem(ONBOARDING_KEY)
   )
@@ -65,25 +83,87 @@ export default function App() {
   useKeyboardShortcuts()
 
   useEffect(() => {
-    setStatus(status)
-  }, [status, setStatus])
+    statusOverrideRef.current = statusOverride
+  }, [statusOverride])
 
   useEffect(() => {
-    setRefreshResolve(refresh)
-  }, [refresh, setRefreshResolve])
+    const activeStatus = statusOverrideRef.current
+    const activeKey = getResolveStatusKey(activeStatus)
+    const nextKey = getResolveStatusKey(status)
+
+    if (!activeKey || !activeStatus.connected) {
+      setStatusOverride(status)
+      setPendingResolveChange(null)
+      return
+    }
+
+    if (!status.connected) {
+      if (transcriptionRunning && activeStatus.connected) {
+        return
+      }
+      setStatusOverride(status)
+      setPendingResolveChange(null)
+      return
+    }
+
+    if (!nextKey) {
+      if (transcriptionRunning && activeStatus.connected) {
+        return
+      }
+      return
+    }
+
+    if (activeKey === nextKey) {
+      setStatusOverride(status)
+      setPendingResolveChange(null)
+      return
+    }
+
+    setPendingResolveChange(status)
+  }, [status, setPendingResolveChange, transcriptionRunning])
 
   useEffect(() => {
+    setStatus(statusOverride)
+  }, [statusOverride, setStatus])
+
+  useEffect(() => {
+    setRefreshResolve(async () => {
+      const nextStatus = await refresh()
+      if (!nextStatus) return
+      setStatusOverride(nextStatus)
+      setPendingResolveChange(null)
+    })
+  }, [refresh, setPendingResolveChange, setRefreshResolve])
+
+  useEffect(() => {
+    if (transcriptionRunning) {
+      return
+    }
+
     const nextKey =
-      status.connected && status.project?.name && status.timeline?.name
-        ? `${status.project.name}::${status.timeline.name}`
+      statusOverride.connected && statusOverride.project?.name && statusOverride.timeline?.name
+        ? `${statusOverride.project.name}::${statusOverride.timeline.name}`
         : null
 
     if (timelineKeyRef.current !== null && timelineKeyRef.current !== nextKey) {
-      clearAll()
+      if (transcriptSession || transcriptWords.length > 0) {
+        clearNonTranscriptData()
+      } else {
+        clearAll()
+      }
       useOperationStore.getState().clearAll()
     }
     timelineKeyRef.current = nextKey
-  }, [status.connected, status.project?.name, status.timeline?.name, clearAll])
+  }, [
+    statusOverride.connected,
+    statusOverride.project?.name,
+    statusOverride.timeline?.name,
+    clearAll,
+    clearNonTranscriptData,
+    transcriptSession,
+    transcriptWords.length,
+    transcriptionRunning,
+  ])
 
   const handleOnboardingComplete = () => {
     localStorage.setItem(ONBOARDING_KEY, 'true')

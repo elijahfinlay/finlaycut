@@ -68,28 +68,46 @@ class ResolveService:
             return {
                 "connected": False,
                 "project": None,
-                "timeline": None
+                "timeline": None,
+                "using_cached": False,
             }
 
         try:
+            using_cached = False
             info = get_project_info(self._resolve)
             if info is None:
-                self._connected = False
-                return {"connected": False, "project": None, "timeline": None}
+                info = self._last_project_info
+                if info is None:
+                    self._connected = False
+                    return {"connected": False, "project": None, "timeline": None, "using_cached": False}
+                logger.warning("Resolve status lookup returned no project info; using cached status")
+                using_cached = True
 
             self._last_project_info = info
             return {
                 "connected": True,
                 "project": {
-                    "name": info["project_name"],
-                    "timeline_count": info["timeline_count"]
-                },
-                "timeline": info["current_timeline"]
+                        "name": info["project_name"],
+                        "timeline_count": info["timeline_count"]
+                    },
+                "timeline": info["current_timeline"],
+                "using_cached": using_cached,
             }
         except Exception as e:
-            logger.error("Error getting status: %s", e)
+            logger.warning("Error getting Resolve status; using cached project info if available: %s", e)
+            if self._last_project_info is not None:
+                info = self._last_project_info
+                return {
+                    "connected": True,
+                    "project": {
+                        "name": info["project_name"],
+                        "timeline_count": info["timeline_count"]
+                    },
+                    "timeline": info["current_timeline"],
+                    "using_cached": True,
+                }
             self._connected = False
-            return {"connected": False, "project": None, "timeline": None}
+            return {"connected": False, "project": None, "timeline": None, "using_cached": False}
 
     def set_watched_signature(self, signature: str | None, timeline_name: str | None = None):
         """Store the signature the frontend wants us to watch for changes."""
@@ -135,8 +153,11 @@ class ResolveService:
                 else:
                     # Verify connection is still alive
                     status = await asyncio.to_thread(self.get_status)
-                    if not status["connected"]:
-                        logger.warning("Lost connection, will retry...")
+                    if not status["connected"] or status.get("using_cached"):
+                        if status.get("using_cached"):
+                            logger.warning("Resolve status is stale, refreshing connection...")
+                        else:
+                            logger.warning("Lost connection, will retry...")
                         await asyncio.to_thread(self.try_connect)
 
                     # Check timeline signature every 2nd cycle (~4s)
@@ -546,47 +567,176 @@ class ResolveService:
             logger.error("Failed to close gaps: %s", e)
             return False
 
-    def link_all_clips(self) -> bool:
-        """Select all clips and link them (Cmd+A then Option+Cmd+L).
-        This links matching video+audio pairs on the timeline."""
-        import subprocess
-        import time as _time
+    def get_media_pool_item_unique_id(self, timeline_item) -> str | None:
+        """Return the underlying media pool item's unique ID if available."""
+        if timeline_item is None:
+            return None
+        try:
+            media_pool_item = timeline_item.GetMediaPoolItem()
+        except Exception:
+            return None
+        if media_pool_item is None:
+            return None
 
+        for method_name in ("GetUniqueId", "GetMediaId", "GetClipProperty"):
+            method = getattr(media_pool_item, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                value = method() if method_name != "GetClipProperty" else method("MediaId")
+            except Exception:
+                continue
+            if value is None:
+                continue
+            value_str = str(value).strip()
+            if value_str:
+                return value_str
+        return None
+
+    @staticmethod
+    def _timeline_records_overlap_frames(record_a: dict, record_b: dict) -> int:
+        try:
+            start = max(int(record_a["clip_start_frame"]), int(record_b["clip_start_frame"]))
+            end = min(int(record_a["clip_end_frame"]), int(record_b["clip_end_frame"]))
+        except Exception:
+            return 0
+        return max(0, end - start)
+
+    def _link_candidate_score(self, video_record: dict, audio_record: dict) -> tuple | None:
+        overlap_frames = self._timeline_records_overlap_frames(video_record, audio_record)
+        if overlap_frames <= 0:
+            return None
+
+        video_media_id = video_record.get("media_pool_item_unique_id")
+        audio_media_id = audio_record.get("media_pool_item_unique_id")
+        same_media_pool_item = bool(video_media_id and audio_media_id and video_media_id == audio_media_id)
+
+        video_path = video_record.get("file_path")
+        audio_path = audio_record.get("file_path")
+        same_file_path = bool(video_path and audio_path and video_path == audio_path)
+
+        if not same_media_pool_item and not same_file_path:
+            return None
+
+        video_source_start = video_record.get("source_start_frame")
+        video_source_end = video_record.get("source_end_frame")
+        audio_source_start = audio_record.get("source_start_frame")
+        audio_source_end = audio_record.get("source_end_frame")
+        same_source_span = (
+            video_source_start is not None
+            and video_source_end is not None
+            and audio_source_start is not None
+            and audio_source_end is not None
+            and int(video_source_start) == int(audio_source_start)
+            and int(video_source_end) == int(audio_source_end)
+        )
+
+        clip_start_delta = abs(int(video_record["clip_start_frame"]) - int(audio_record["clip_start_frame"]))
+        clip_end_delta = abs(int(video_record["clip_end_frame"]) - int(audio_record["clip_end_frame"]))
+
+        return (
+            1 if same_media_pool_item else 0,
+            1 if same_source_span else 0,
+            1 if same_file_path else 0,
+            overlap_frames,
+            -clip_start_delta,
+            -clip_end_delta,
+            -int(audio_record.get("track_index") or 0),
+        )
+
+    def link_all_clips(self) -> dict:
+        """
+        Link each video clip to the best matching overlapping audio clip on the
+        current timeline using Resolve's scripting API.
+        """
         timeline = self.get_current_timeline()
         if timeline is None:
-            return False
+            return {"success": False, "error": "No active timeline"}
+
+        set_clips_linked = getattr(timeline, "SetClipsLinked", None)
+        if not callable(set_clips_linked):
+            return {"success": False, "error": "Resolve does not expose clip-linking through the scripting API"}
+
         try:
-            # Bring Resolve to focus
-            subprocess.run(["osascript", "-e",
-                'tell application "DaVinci Resolve" to activate'
-            ], capture_output=True, timeout=2)
-            _time.sleep(0.2)
+            records = self._get_timeline_item_records()
+            enriched_records: list[dict] = []
+            for record in records:
+                enriched = dict(record)
+                enriched["media_pool_item_unique_id"] = self.get_media_pool_item_unique_id(record.get("item"))
+                enriched_records.append(enriched)
 
-            # Cmd+A = Select All
-            subprocess.run(["osascript", "-e",
-                'tell application "System Events" to tell process "Resolve" '
-                'to key code 0 using {command down}'  # key code 0 = A
-            ], capture_output=True, timeout=2)
-            _time.sleep(0.15)
+            video_records = sorted(
+                [record for record in enriched_records if record.get("media_type") == "video"],
+                key=lambda record: (
+                    int(record.get("clip_start_frame") or 0),
+                    int(record.get("track_index") or 0),
+                ),
+            )
+            audio_records = [
+                record for record in enriched_records
+                if record.get("media_type") == "audio"
+            ]
 
-            # Option+Cmd+L = Link Clips
-            subprocess.run(["osascript", "-e",
-                'tell application "System Events" to tell process "Resolve" '
-                'to key code 37 using {command down, option down}'  # key code 37 = L
-            ], capture_output=True, timeout=2)
-            _time.sleep(0.15)
+            if not video_records or not audio_records:
+                return {
+                    "success": False,
+                    "error": "Need at least one video clip and one audio clip on the current timeline",
+                }
 
-            # Deselect all (Cmd+Shift+A)
-            subprocess.run(["osascript", "-e",
-                'tell application "System Events" to tell process "Resolve" '
-                'to key code 0 using {command down, shift down}'
-            ], capture_output=True, timeout=2)
+            linked_pairs = 0
+            used_audio_item_ids: set[int] = set()
+            for video_record in video_records:
+                best_audio_record = None
+                best_score = None
+                for audio_record in audio_records:
+                    audio_item = audio_record.get("item")
+                    if audio_item is None:
+                        continue
+                    audio_item_id = id(audio_item)
+                    if audio_item_id in used_audio_item_ids:
+                        continue
 
-            logger.info("Select all + link clips executed")
-            return True
+                    score = self._link_candidate_score(video_record, audio_record)
+                    if score is None:
+                        continue
+                    if best_score is None or score > best_score:
+                        best_score = score
+                        best_audio_record = audio_record
+
+                if best_audio_record is None:
+                    continue
+
+                video_item = video_record.get("item")
+                audio_item = best_audio_record.get("item")
+                if video_item is None or audio_item is None:
+                    continue
+
+                linked = bool(set_clips_linked([video_item, audio_item], True))
+                if not linked:
+                    logger.warning(
+                        "SetClipsLinked failed for video clip starting at frame %s and audio clip starting at frame %s",
+                        video_record.get("clip_start_frame"),
+                        best_audio_record.get("clip_start_frame"),
+                    )
+                    continue
+
+                used_audio_item_ids.add(id(audio_item))
+                linked_pairs += 1
+
+            if linked_pairs == 0:
+                return {
+                    "success": False,
+                    "error": "Could not find any matching video/audio clip pairs to link",
+                }
+
+            logger.info("Linked %d matching video/audio clip pairs", linked_pairs)
+            return {
+                "success": True,
+                "linked_pairs": linked_pairs,
+            }
         except Exception as e:
-            logger.error("Failed to link clips: %s", e)
-            return False
+            logger.error("Failed to link clips pairwise: %s", e)
+            return {"success": False, "error": str(e)}
 
     def apply_ripple_cuts(self, cut_segments: list[dict]) -> dict:
         """Apply ripple cuts using Resolve's blade tool + ripple delete.

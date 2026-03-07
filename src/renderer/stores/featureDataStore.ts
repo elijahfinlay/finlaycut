@@ -45,6 +45,23 @@ interface TranscriptSession {
   origin: 'transcribe' | 'transcript_apply' | 'reconcile'
 }
 
+interface TranscriptBackup {
+  words: TranscriptWord[]
+  language: string
+  context: TranscriptContext | null
+  session: TranscriptSession | null
+  speakers: any[]
+  waveform: { amplitudes: number[]; duration: number } | null
+  savedAt: number
+}
+
+interface PendingTranscriptRecovery {
+  startedAt: number
+  timelineName: string | null
+  language: string | null
+  range: { in_seconds: number; out_seconds: number } | null
+}
+
 interface FillerDetection {
   word: string
   start: number
@@ -86,6 +103,11 @@ interface FeatureDataState {
   // Transcript Editor — waveform (survives page switches)
   transcriptWaveform: { amplitudes: number[]; duration: number } | null
   setTranscriptWaveform: (wf: { amplitudes: number[]; duration: number } | null) => void
+  transcriptBackup: TranscriptBackup | null
+  setTranscriptBackup: (backup: TranscriptBackup | null) => void
+  restoreTranscriptBackup: () => TranscriptBackup | null
+  pendingTranscriptRecovery: PendingTranscriptRecovery | null
+  setPendingTranscriptRecovery: (recovery: PendingTranscriptRecovery | null) => void
 
   // Filler Word Removal
   fillerDetections: FillerDetection[]
@@ -128,12 +150,13 @@ interface FeatureDataState {
   setPodcastTracks: (tracks: any[]) => void
 
   // Clear all data (e.g. when timeline changes)
+  clearNonTranscriptData: () => void
   clearAll: () => void
 }
 
 export const useFeatureDataStore = create<FeatureDataState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       // Transcript
       transcriptWords: [],
       transcriptLanguage: '',
@@ -149,6 +172,30 @@ export const useFeatureDataStore = create<FeatureDataState>()(
       // Waveform
       transcriptWaveform: null,
       setTranscriptWaveform: (wf) => set({ transcriptWaveform: wf }),
+      transcriptBackup: null,
+      setTranscriptBackup: (backup) => set({ transcriptBackup: backup }),
+      restoreTranscriptBackup: () => {
+        const backup = get().transcriptBackup
+        if (!backup) return null
+        set({
+          transcriptWords: backup.words.map((word) => ({ ...word })),
+          transcriptLanguage: backup.language,
+          transcriptContext: backup.context ? { ...backup.context } : null,
+          transcriptSession: backup.session ? { ...backup.session } : null,
+          transcriptSpeakers: Array.isArray(backup.speakers)
+            ? backup.speakers.map((speaker) => ({ ...speaker }))
+            : [],
+          transcriptWaveform: backup.waveform
+            ? {
+                amplitudes: [...backup.waveform.amplitudes],
+                duration: backup.waveform.duration,
+              }
+            : null,
+        })
+        return backup
+      },
+      pendingTranscriptRecovery: null,
+      setPendingTranscriptRecovery: (recovery) => set({ pendingTranscriptRecovery: recovery }),
 
       // Filler
       fillerDetections: [],
@@ -190,6 +237,19 @@ export const useFeatureDataStore = create<FeatureDataState>()(
       podcastTracks: [],
       setPodcastTracks: (tracks) => set({ podcastTracks: tracks }),
 
+      clearNonTranscriptData: () => set({
+        fillerDetections: [],
+        silenceSegments: [],
+        captions: [],
+        srtContent: '',
+        chapters: [],
+        zoomPoints: [],
+        viralClips: [],
+        brollSuggestions: [],
+        repetitionGroups: [],
+        podcastTracks: [],
+      }),
+
       // Clear
       clearAll: () => set({
         transcriptWords: [],
@@ -220,6 +280,8 @@ export const useFeatureDataStore = create<FeatureDataState>()(
         transcriptSession: state.transcriptSession,
         transcriptSpeakers: state.transcriptSpeakers,
         transcriptWaveform: state.transcriptWaveform,
+        transcriptBackup: state.transcriptBackup,
+        pendingTranscriptRecovery: state.pendingTranscriptRecovery,
         fillerDetections: state.fillerDetections,
         silenceSegments: state.silenceSegments,
         silenceSettings: state.silenceSettings,

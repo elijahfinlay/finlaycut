@@ -24,7 +24,8 @@ class TranscribeRequest(BaseModel):
     language: Optional[str] = None
     in_seconds: Optional[float] = None
     out_seconds: Optional[float] = None
-    detect_speakers: bool = True
+    detect_speakers: bool = False
+    filler_words: Optional[list[str]] = None
 
 
 class KeptSegment(BaseModel):
@@ -92,6 +93,82 @@ class ReconcileRequest(BaseModel):
 class JumpWordRequest(BaseModel):
     word: KeptSegment
     transcript_context: Optional[TranscriptContext] = None
+
+
+def _match_clip_segment_for_range(
+    clip_segments_sorted: list[dict],
+    word_start_sec: float,
+    word_end_sec: float,
+    fps: float,
+) -> dict | None:
+    midpoint = (word_start_sec + word_end_sec) / 2.0
+    for seg in clip_segments_sorted:
+        if seg["timeline_start_seconds"] - (1.0 / fps) <= midpoint < seg["timeline_end_seconds"] + (1.0 / fps):
+            return seg
+
+    best_match = None
+    best_overlap = 0.0
+    for seg in clip_segments_sorted:
+        overlap_start = max(word_start_sec, seg["timeline_start_seconds"])
+        overlap_end = min(word_end_sec, seg["timeline_end_seconds"])
+        overlap = max(0.0, overlap_end - overlap_start)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_match = seg
+    return best_match
+
+
+def _annotate_filler_detections(
+    detections: list[dict],
+    audio_offset: float,
+    timeline_start_frame: int,
+    fps: float,
+    clip_segments_sorted: list[dict],
+) -> list[dict]:
+    annotated: list[dict] = []
+    for detection in detections:
+        try:
+            local_start = float(detection.get("start", 0.0))
+            local_end = float(detection.get("end", local_start))
+        except Exception:
+            continue
+        if local_end <= local_start:
+            continue
+
+        timeline_start = local_start + float(audio_offset)
+        timeline_end = local_end + float(audio_offset)
+        updated = dict(detection)
+        updated["start"] = round(timeline_start, 4)
+        updated["end"] = round(timeline_end, 4)
+        updated["start_frame"] = int(timeline_start_frame) + int(round(timeline_start * float(fps)))
+        updated["end_frame"] = int(timeline_start_frame) + int(round(timeline_end * float(fps)))
+
+        matched_segment = _match_clip_segment_for_range(
+            clip_segments_sorted,
+            timeline_start,
+            timeline_end,
+            fps,
+        )
+        if matched_segment is not None:
+            seg_start_frame = int(matched_segment["timeline_start_frame"])
+            seg_end_frame = int(matched_segment["timeline_end_frame"])
+            detection_start_frame = max(seg_start_frame, min(seg_end_frame, int(updated["start_frame"])))
+            detection_end_frame = max(seg_start_frame, min(seg_end_frame, int(updated["end_frame"])))
+            updated["start_frame"] = detection_start_frame
+            updated["end_frame"] = detection_end_frame
+
+            source_start_frame = matched_segment.get("source_start_frame")
+            if source_start_frame is not None:
+                updated["source_start_frame"] = int(source_start_frame) + max(0, detection_start_frame - seg_start_frame)
+                updated["source_end_frame"] = int(source_start_frame) + max(0, detection_end_frame - seg_start_frame)
+            if matched_segment.get("file_path"):
+                updated["file_path"] = matched_segment.get("file_path")
+            if matched_segment.get("clip_item_id"):
+                updated["clip_item_id"] = matched_segment.get("clip_item_id")
+
+        annotated.append(updated)
+
+    return annotated
 
 
 def _merge_frame_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -184,6 +261,7 @@ async def transcribe_timeline(request: TranscribeRequest):
     timeline_start_frame = int(timeline.GetStartFrame())
     timeline_end_frame = int(timeline.GetEndFrame())
     timeline_duration_seconds = (timeline_end_frame - timeline_start_frame) / fps
+    bound_signature_info = resolve_service.get_timeline_signature()
 
     # Determine range to transcribe
     range_in = request.in_seconds
@@ -227,11 +305,12 @@ async def transcribe_timeline(request: TranscribeRequest):
 
     try:
         clip_segments: list[dict] = []
+        cached_audio_duration = timeline_duration_seconds
         if rendered_timeline_audio:
             await manager.send_progress("transcript_editor", 0.10, "Using rendered timeline audio...")
             audio_path = rendered_timeline_audio
             audio_offset = 0.0
-            set_last_transcription_audio(audio_path, timeline_duration_seconds)
+            cached_audio_duration = timeline_duration_seconds
         else:
             await manager.send_progress(
                 "transcript_editor",
@@ -310,25 +389,40 @@ async def transcribe_timeline(request: TranscribeRequest):
                 # Single clip full timeline — use its audio directly, track the timeline offset
                 audio_path = clip_segments[0]["audio_path"]
                 audio_offset = clip_segments[0]["timeline_start_seconds"]
+                cached_audio_duration = float(clip_segments[0]["duration_seconds"])
             else:
                 # Multiple clips or range mode — stitch into one file with correct timeline positions
                 audio_path = assemble_timeline_audio(clip_segments, timeline_duration_seconds)
                 audio_offset = 0.0  # Assembled audio starts at timeline start
-
-            # Store for waveform reuse (before any range trimming)
-            set_last_transcription_audio(audio_path, timeline_duration_seconds)
+                cached_audio_duration = timeline_duration_seconds
 
         # If range mode, trim the assembled audio to just the in/out range
         if is_range and audio_offset == 0.0:
             try:
                 if rendered_timeline_audio:
                     audio_offset = range_in  # Rendered fallback already matches the requested span
+                    cached_audio_duration = max(0.0, float(range_out - range_in))
                 else:
                     trimmed_path = extract_audio_segment(audio_path, range_in, range_out)
                     audio_path = trimmed_path
                     audio_offset = range_in  # Words start at the in-point on the timeline
+                    cached_audio_duration = max(0.0, float(range_out - range_in))
             except Exception as e:
                 logger.warning("Range trim failed (%s), transcribing full audio", e)
+
+        timeline_signature = str(bound_signature_info.get("timeline_signature") or "") if bound_signature_info else None
+        covers_full_timeline = (
+            not is_range
+            and abs(float(audio_offset)) <= 0.05
+            and abs(float(cached_audio_duration) - float(timeline_duration_seconds)) <= max(0.1, 1.0 / fps)
+        )
+        set_last_transcription_audio(
+            audio_path,
+            float(cached_audio_duration),
+            offset=float(audio_offset),
+            timeline_signature=timeline_signature,
+            covers_full_timeline=covers_full_timeline,
+        )
 
         # Transcribe with real progress
         async def progress_fn(pct, msg):
@@ -341,26 +435,24 @@ async def transcribe_timeline(request: TranscribeRequest):
             progress_fn=progress_fn,
         )
 
+        filler_detections: list[dict] | None = None
+        if transcript.get("words"):
+            try:
+                await manager.send_progress("transcript_editor", 0.96, "Detecting filler words...")
+                filler_detections = audio_service.analyze_filler_candidates(
+                    audio_path,
+                    {
+                        "words": [dict(word) for word in transcript.get("words", [])],
+                    },
+                    filler_words=request.filler_words,
+                )
+            except Exception as e:
+                logger.warning("Automatic filler detection failed during transcription: %s", e)
+                filler_detections = None
+
         # Map word timestamps to timeline positions
         words = transcript.get("words", [])
         clip_segments_sorted = sorted(clip_segments, key=lambda seg: seg["timeline_start_seconds"])
-
-        def _match_clip_segment(word_start_sec: float, word_end_sec: float) -> dict | None:
-            midpoint = (word_start_sec + word_end_sec) / 2.0
-            for seg in clip_segments_sorted:
-                if seg["timeline_start_seconds"] - (1.0 / fps) <= midpoint < seg["timeline_end_seconds"] + (1.0 / fps):
-                    return seg
-
-            best_match = None
-            best_overlap = 0.0
-            for seg in clip_segments_sorted:
-                overlap_start = max(word_start_sec, seg["timeline_start_seconds"])
-                overlap_end = min(word_end_sec, seg["timeline_end_seconds"])
-                overlap = max(0.0, overlap_end - overlap_start)
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    best_match = seg
-            return best_match
 
         for w in words:
             word_start_sec = float(w["start"]) + audio_offset
@@ -370,7 +462,12 @@ async def transcribe_timeline(request: TranscribeRequest):
             w["start"] = word_start_sec
             w["end"] = word_end_sec
 
-            matched_segment = _match_clip_segment(word_start_sec, word_end_sec)
+            matched_segment = _match_clip_segment_for_range(
+                clip_segments_sorted,
+                word_start_sec,
+                word_end_sec,
+                fps,
+            )
             if matched_segment is not None:
                 seg_start_frame = int(matched_segment["timeline_start_frame"])
                 seg_end_frame = int(matched_segment["timeline_end_frame"])
@@ -388,6 +485,40 @@ async def transcribe_timeline(request: TranscribeRequest):
         # If range mode, filter out any words that leaked outside the range
         if is_range:
             words = [w for w in words if w["start"] >= range_in - 0.1 and w["end"] <= range_out + 0.1]
+
+        transcript_text = " ".join(str(w.get("word", "")).strip() for w in words).strip()
+        if not words:
+            logger.error(
+                "Transcription produced zero words for timeline '%s' (language=%s, range=%s, rendered_fallback=%s)",
+                bound_signature_info.get("timeline_name") if bound_signature_info else timeline.GetName(),
+                transcript.get("language"),
+                is_range,
+                bool(rendered_timeline_audio),
+            )
+            return {
+                "error": (
+                    "Transcription finished without any word timings. "
+                    "This usually means the selected timeline audio had no detectable speech "
+                    "or the transcript model returned no usable word tokens."
+                ),
+                "code": "EMPTY_TRANSCRIPT",
+                "text": transcript_text,
+                "word_count": 0,
+            }
+
+        if filler_detections is not None:
+            filler_detections = _annotate_filler_detections(
+                filler_detections,
+                audio_offset,
+                timeline_start_frame,
+                fps,
+                clip_segments_sorted,
+            )
+            if is_range:
+                filler_detections = [
+                    detection for detection in filler_detections
+                    if detection["start"] >= range_in - 0.1 and detection["end"] <= range_out + 0.1
+                ]
 
         speaker_segments: list[dict] = []
         speaker_summaries: list[dict] = []
@@ -449,22 +580,20 @@ async def transcribe_timeline(request: TranscribeRequest):
                 "source_start_frame": None,
                 "source_end_frame": None,
             }
-        transcript_signature = resolve_service.get_timeline_signature()
         transcript_session = (
-            _build_transcript_session(transcript_signature, "transcribe")
-            if transcript_signature is not None
+            _build_transcript_session(bound_signature_info, "transcribe")
+            if bound_signature_info is not None
             else None
         )
 
-        await manager.send_progress("transcript_editor", 1.0, "Transcription complete")
-
-        return {
+        payload = {
             "words": words,
             "transcript_context": transcript_context,
             "transcript_session": transcript_session,
-            "text": " ".join(w["word"] for w in words),
+            "text": transcript_text,
             "language": transcript.get("language"),
             "word_count": len(words),
+            "filler_detections": filler_detections,
             "range": {"in_seconds": range_in, "out_seconds": range_out} if is_range else None,
             "segments": speaker_segments,
             "speakers": speaker_summaries,
@@ -473,6 +602,16 @@ async def transcribe_timeline(request: TranscribeRequest):
             "speaker_fallback_reason": speaker_fallback_reason,
             "speaker_detection_error": speaker_detection_error,
         }
+        logger.info(
+            "Transcript complete for '%s': %d words, session_bound=%s, range=%s",
+            transcript_session.get("timeline_name") if transcript_session else timeline.GetName(),
+            len(words),
+            bool(transcript_session),
+            is_range,
+        )
+        await manager.send_progress("transcript_editor", 1.0, "Transcription complete")
+        await manager.send_complete("transcript_editor", payload)
+        return payload
     except Exception as e:
         await manager.send_error("transcript_editor", str(e))
         return {"error": str(e)}

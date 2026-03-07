@@ -33,9 +33,10 @@ export function useResolveStatus(pollInterval = 2000) {
       const data = await apiFetch<ResolveStatus>('/api/resolve/status')
       setStatus(data)
       setError(null)
+      return data
     } catch (err: any) {
-      setStatus({ connected: false, project: null, timeline: null })
       setError('Backend not reachable')
+      return null
     }
   }, [])
 

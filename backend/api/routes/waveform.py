@@ -39,39 +39,51 @@ async def analyze_waveform(
             return {"error": "Timeline has no duration"}
 
         # Reuse audio from the last transcription if available
+        signature_info = resolve_service.get_timeline_signature()
+        current_timeline_signature = str(signature_info.get("timeline_signature") or "") if signature_info else ""
         cached = get_last_transcription_audio()
         if cached and os.path.exists(cached[0]):
-            audio_path, duration = cached
-            logger.info("Reusing cached transcription audio: %s (%.1fs)", audio_path, duration)
-            await manager.send_progress("waveform", 0.35, "Using transcription audio...")
+            audio_path, cached_duration, audio_offset, cached_signature, cached_covers_full_timeline = cached
+            signature_matches = (
+                not current_timeline_signature
+                or (cached_signature is not None and cached_signature == current_timeline_signature)
+            )
+            if cached_covers_full_timeline and signature_matches:
+                logger.info(
+                    "Reusing cached transcription audio: %s (duration=%.1fs, offset=%.1fs)",
+                    audio_path,
+                    cached_duration,
+                    audio_offset,
+                )
+                await manager.send_progress("waveform", 0.35, "Using transcription audio...")
 
-            import numpy as np
-            import librosa
+                import numpy as np
+                import librosa
 
-            await manager.send_progress("waveform", 0.50, "Computing waveform...")
-            y, sr = librosa.load(audio_path, sr=22050, mono=True)
+                await manager.send_progress("waveform", 0.50, "Computing waveform...")
+                y, sr = librosa.load(audio_path, sr=22050, mono=True)
 
-            expected_samples = int(duration * sr)
-            if len(y) > expected_samples:
-                y = y[:expected_samples]
+                expected_samples = int(timeline_duration_seconds * sr)
+                if len(y) > expected_samples:
+                    y = y[:expected_samples]
 
-            indices = np.linspace(0, len(y), samples + 1, dtype=int)
-            amplitudes = []
-            for i in range(samples):
-                chunk = y[indices[i]:indices[i+1]]
-                amplitudes.append(float(np.sqrt(np.mean(chunk**2))) if len(chunk) > 0 else 0.0)
+                indices = np.linspace(0, len(y), samples + 1, dtype=int)
+                amplitudes = []
+                for i in range(samples):
+                    chunk = y[indices[i]:indices[i+1]]
+                    amplitudes.append(float(np.sqrt(np.mean(chunk**2))) if len(chunk) > 0 else 0.0)
 
-            max_amp = max(amplitudes) if amplitudes else 1.0
-            if max_amp > 0:
-                amplitudes = [a / max_amp for a in amplitudes]
+                max_amp = max(amplitudes) if amplitudes else 1.0
+                if max_amp > 0:
+                    amplitudes = [a / max_amp for a in amplitudes]
 
-            await manager.send_progress("waveform", 1.0, "Waveform ready")
-            return {
-                "amplitudes": amplitudes,
-                "duration": duration,
-                "sample_count": len(amplitudes),
-                "sample_rate": sr,
-            }
+                await manager.send_progress("waveform", 1.0, "Waveform ready")
+                return {
+                    "amplitudes": amplitudes,
+                    "duration": timeline_duration_seconds,
+                    "sample_count": len(amplitudes),
+                    "sample_rate": sr,
+                }
 
         clip_selection = resolve_service.get_timeline_audio_clip_contexts()
         clip_contexts = clip_selection["contexts"]

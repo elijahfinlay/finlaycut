@@ -92,19 +92,13 @@ export const FILLER_RELEASE_PAD_FRAMES = 1
 
 /** Unambiguous hesitation fillers only. Common lexical fillers stay backend-driven. */
 export const FILLER_WORDS = new Set([
-  'um', 'uh', 'uh-huh', 'uhh', 'uhm', 'umm',
-  'hmm', 'hm', 'mmhmm', 'mhm', 'mm', 'mmm',
-  'huh', 'er', 'erm', 'ah', 'ahh',
+  'um', 'uh', 'uhh', 'uhm', 'umm',
 ])
 export const FILLER_PATTERNS = [
   /^u+h+$/i,
   /^u+m+h*$/i,
   /^u+h+m*$/i,
   /^u+m+$/i,
-  /^h+m+$/i,
-  /^m+h+m+$/i,
-  /^e+r+m*$/i,
-  /^a+h+$/i,
 ]
 export const SPEAKER_BADGE_STYLES = [
   'bg-cyan-500/15 text-cyan-200 border border-cyan-500/30',
@@ -340,11 +334,11 @@ export function isLikelyFillerWord(
       : null
   const gapBefore = prevWord ? Math.max(0, word.start - prevWord.end) : Infinity
   const gapAfter = nextWord ? Math.max(0, nextWord.start - word.end) : Infinity
-  const hesitationLike = /^(?:mm+|hm+|mhm+|hmm+|umm+|uhh+|uhm+|er+|erm+|ahh+)$/.test(norm)
+  const hesitationLike = /^(?:u+m+h*|u+h+m*|u+m+|u+h+)$/.test(norm)
 
   return (
     hesitationLike &&
-    duration <= 0.85 &&
+    duration <= 0.55 &&
     (duration >= 0.08 || (frameSpan !== null && frameSpan >= MIN_FILLER_FRAMES)) &&
     (gapBefore >= 0.02 || gapAfter >= 0.02 || !prevWord || !nextWord)
   )

@@ -7,6 +7,7 @@ import json
 import hashlib
 import asyncio
 import logging
+import re
 import time
 import threading
 from pathlib import Path
@@ -35,7 +36,7 @@ class AudioService:
         self._model_name = settings.whisper_model
         self._device = settings.whisper_device
         self._compute_type = settings.whisper_compute_type
-        self._transcript_cache_version = "v7_onset_refine"
+        self._transcript_cache_version = "v9_filler_offset_fix"
 
     def _get_cache_key(self, audio_path: str, language: str | None = None) -> str:
         """Generate a cache key based on file path and modification time."""
@@ -102,13 +103,15 @@ class AudioService:
         filler_prompt = (
             "Um, uh, uhm, umm, hmm, mm, erm, ah. Keep hesitation sounds exactly as spoken. "
             "Do not omit filler words at the beginning of sentences. "
-            "Transcribe brief fillers such as um, uh, erm, ah, hmm, mm, mhm verbatim."
+            "Transcribe brief fillers such as um, uh, erm, ah, hmm, mm, mhm verbatim, including after pauses."
         )
 
         logger.info("Loading WhisperX model: %s (device=%s, compute=%s)", name, self._device, self._compute_type)
         asr_opts = {
             "initial_prompt": filler_prompt,
             "condition_on_previous_text": False,  # Re-apply prompt every segment
+            "no_speech_threshold": 0.82,
+            "suppress_blank": False,
         }
         try:
             # hotwords boosts probability of filler words (requires faster-whisper >= 1.0)
@@ -119,8 +122,7 @@ class AudioService:
                 asr_options={
                     **asr_opts,
                     "hotwords": (
-                        "um uh uhm umm uhh uhhh erm er ah ahh hmm hm mm mhm mmhm "
-                        "like you know i mean kind of sort of basically actually literally well okay yeah"
+                        "um uh uhm umm uhh uhhh uh-huh erm er ah ahh hmm hm mm mhm mmhm mmhmm"
                     ),
                 },
             )
@@ -134,8 +136,203 @@ class AudioService:
                 asr_options=asr_opts,
             )
         self._model_name = name
-        self._transcript_cache_version = "v7_onset_refine"  # Bust old caches
+        self._transcript_cache_version = "v9_filler_offset_fix"  # Bust old caches
         logger.info("WhisperX model loaded: %s (filler word detection enabled)", name)
+
+    @staticmethod
+    def _clean_filler_token(text: str) -> str:
+        return re.sub(r"[^a-z-]", "", text.lower())
+
+    @classmethod
+    def _is_hesitation_token(cls, text: str) -> bool:
+        cleaned = cls._clean_filler_token(text)
+        if not cleaned:
+            return False
+        if cleaned in {
+            "um", "uh", "uh-huh", "uhh", "uhm", "umm",
+            "hmm", "hm", "mhm", "mmhm", "mmhmm", "mm", "mmm",
+            "huh", "er", "erm", "ah", "ahh",
+        }:
+            return True
+        return any(
+            pattern.match(cleaned)
+            for pattern in (
+                re.compile(r"^u+h+$"),
+                re.compile(r"^u+m+h*$"),
+                re.compile(r"^u+h+m*$"),
+                re.compile(r"^u+m+$"),
+                re.compile(r"^[hm]+$"),
+                re.compile(r"^m+h+m+$"),
+                re.compile(r"^e+r+m*$"),
+                re.compile(r"^a+h+$"),
+            )
+        )
+
+    @classmethod
+    def _hesitation_family(cls, text: str) -> str | None:
+        cleaned = cls._clean_filler_token(text)
+        if not cleaned:
+            return None
+        if cleaned == "uh-huh":
+            return "uh"
+        if cleaned in {"er", "erm"} or re.fullmatch(r"e+r+m*", cleaned):
+            return "erm"
+        if cleaned in {"ah", "ahh"} or re.fullmatch(r"a+h+", cleaned):
+            return "ah"
+        if cleaned in {"um", "umm", "uhm"} or re.fullmatch(r"u+m+h*", cleaned) or re.fullmatch(r"u+h+m*", cleaned) or re.fullmatch(r"u+m+", cleaned):
+            return "um"
+        if cleaned in {"uh", "uhh", "huh"} or re.fullmatch(r"u+h+", cleaned):
+            return "uh"
+        if cleaned in {"hmm", "hm", "mhm", "mmhm", "mmhmm", "mm", "mmm"} or re.fullmatch(r"^[hm]+$", cleaned) or re.fullmatch(r"m+h+m+", cleaned):
+            return "hm"
+        return None
+
+    @classmethod
+    def _allowed_hesitation_families(cls, filler_words: list[str] | None = None) -> set[str]:
+        source = filler_words if filler_words is not None else settings.filler_words
+        families: set[str] = set()
+        for filler in source:
+            if " " in filler:
+                continue
+            family = cls._hesitation_family(filler)
+            if family:
+                families.add(family)
+        return families
+
+    @staticmethod
+    def _patterns_for_hesitation_families(families: set[str]) -> list[re.Pattern[str]]:
+        patterns: list[re.Pattern[str]] = []
+        if "uh" in families:
+            patterns.append(re.compile(r"^u+h+$"))
+        if "um" in families:
+            patterns.extend([
+                re.compile(r"^u+m+h*$"),
+                re.compile(r"^u+h+m*$"),
+                re.compile(r"^u+m+$"),
+            ])
+        if "hm" in families:
+            patterns.extend([
+                re.compile(r"^[hm]+$"),
+                re.compile(r"^m+h+m+$"),
+            ])
+        if "erm" in families:
+            patterns.append(re.compile(r"^e+r+m*$"))
+        if "ah" in families:
+            patterns.append(re.compile(r"^a+h+$"))
+        return patterns
+
+    @staticmethod
+    def _estimate_audio_hesitation_label(
+        allowed_families: set[str],
+        duration: float,
+        avg_centroid: float,
+        avg_rolloff: float,
+        avg_zcr: float,
+        avg_high_band: float,
+    ) -> str:
+        ordered_families = [family for family in ("um", "uh", "erm", "ah", "hm") if family in allowed_families]
+        if not ordered_families:
+            return "[filler]"
+        if len(ordered_families) == 1:
+            return ordered_families[0]
+
+        if "um" in allowed_families and "uh" in allowed_families:
+            nasal_score = 0
+            if duration >= 0.18:
+                nasal_score += 1
+            if avg_centroid <= 1350.0:
+                nasal_score += 1
+            if avg_rolloff <= 2200.0:
+                nasal_score += 1
+            if avg_high_band <= 0.11:
+                nasal_score += 1
+            if avg_zcr <= 0.09:
+                nasal_score += 1
+            return "um" if nasal_score >= 3 else "uh"
+
+        return ordered_families[0]
+
+    @classmethod
+    def _is_repetition_or_stutter_context(
+        cls,
+        prev_word: dict | None,
+        next_word: dict | None,
+    ) -> bool:
+        prev_token = cls._clean_filler_token(prev_word.get("word", "")) if isinstance(prev_word, dict) else ""
+        next_token = cls._clean_filler_token(next_word.get("word", "")) if isinstance(next_word, dict) else ""
+        if not prev_token or not next_token:
+            return False
+        if prev_token == next_token:
+            return True
+
+        shorter, longer = sorted((prev_token, next_token), key=len)
+        return (
+            len(shorter) >= 3
+            and len(longer) - len(shorter) <= 4
+            and longer.startswith(shorter)
+        )
+
+    @staticmethod
+    def _matches_confident_hesitation_family(
+        label: str,
+        duration: float,
+        avg_centroid: float,
+        avg_rolloff: float,
+        avg_zcr: float,
+        avg_high_band: float,
+        avg_flatness: float,
+    ) -> bool:
+        if label == "um":
+            return (
+                0.09 <= duration <= 0.34
+                and avg_centroid <= 1550.0
+                and avg_rolloff <= 2550.0
+                and avg_zcr <= 0.14
+                and avg_high_band <= 0.15
+                and avg_flatness <= 0.34
+            )
+        if label == "uh":
+            return (
+                0.08 <= duration <= 0.28
+                and avg_centroid <= 1750.0
+                and avg_rolloff <= 3000.0
+                and avg_zcr <= 0.15
+                and avg_high_band <= 0.18
+                and avg_flatness <= 0.34
+            )
+        return False
+
+    @staticmethod
+    def _estimate_word_relative_frame(
+        word: dict,
+        target_time: float,
+        frame_key_start: str,
+        frame_key_end: str,
+    ) -> int | None:
+        start_frame = word.get(frame_key_start)
+        end_frame = word.get(frame_key_end)
+        start_time = word.get("start")
+        end_time = word.get("end")
+        if start_frame is None or end_frame is None or start_time is None or end_time is None:
+            return None
+        try:
+            start_frame = int(start_frame)
+            end_frame = int(end_frame)
+            start_time = float(start_time)
+            end_time = float(end_time)
+            target_time = float(target_time)
+        except Exception:
+            return None
+
+        if target_time <= start_time:
+            return start_frame
+        if target_time >= end_time:
+            return end_frame
+        if end_time <= start_time:
+            return start_frame
+
+        ratio = max(0.0, min(1.0, (target_time - start_time) / max(end_time - start_time, 1e-6)))
+        return int(round(start_frame + ((end_frame - start_frame) * ratio)))
 
     def _load_align_model(self, language_code: str):
         """Load the alignment model for a specific language."""
@@ -387,11 +584,14 @@ class AudioService:
             # Wait a bit before next update
             await asyncio.sleep(1.0)
 
-        # Join with timeout to prevent infinite hang if thread is stuck
-        thread.join(timeout=600)
+        # Join with timeout to prevent infinite hang if thread is stuck.
+        # Scale timeout with audio duration: at least 10 min, plus 2x the estimated time.
+        join_timeout = max(600, estimated_seconds * 2 + 120)
+        thread.join(timeout=join_timeout)
         if thread.is_alive():
-            logger.error("Transcription thread hung after 10 minutes — aborting")
-            raise RuntimeError("Transcription timed out after 10 minutes. The audio file may be too large or corrupt.")
+            timeout_min = int(join_timeout // 60)
+            logger.error("Transcription thread hung after %d minutes — aborting", timeout_min)
+            raise RuntimeError(f"Transcription timed out after {timeout_min} minutes. The audio file may be too large or corrupt.")
 
         if error_holder[0] is not None:
             raise error_holder[0]
@@ -445,7 +645,18 @@ class AudioService:
 
         raw_words = segment.get("words", []) or []
         if not raw_words:
-            return []
+            fallback_words = [token.strip() for token in str(segment.get("text", "")).strip().split() if token.strip()]
+            if not fallback_words:
+                return []
+            raw_words = [
+                {
+                    "word": token,
+                    "score": 0.5,
+                    "start": None,
+                    "end": None,
+                }
+                for token in fallback_words
+            ]
 
         normalized = []
         for word in raw_words:
@@ -811,37 +1022,25 @@ class AudioService:
         plus exact matching for word-based fillers (like, basically, actually...).
         No limit on detection count — returns every filler found.
         """
-        import re
-
-        custom_fillers = filler_words or settings.filler_words
+        custom_fillers = filler_words if filler_words is not None else settings.filler_words
 
         min_hesitation_frames = 3
+        allowed_families = self._allowed_hesitation_families(custom_fillers)
+        filler_patterns = self._patterns_for_hesitation_families(allowed_families)
 
-        # Regex patterns that catch elongated hesitation variants Whisper commonly produces.
-        filler_patterns = [
-            re.compile(r"^u+h+$"),              # uh, uhh, uhhh
-            re.compile(r"^u+m+h*$"),            # um, umm, ummh
-            re.compile(r"^u+h+m*$"),            # uhm, uhhm
-            re.compile(r"^u+m+$"),              # um, umm, ummm
-            re.compile(r"^[hm]+$"),             # hm, hmm, hmmm, mm, mmm
-            re.compile(r"^m+h+m+$"),            # mhm, mmhm, mmhmm
-            re.compile(r"^[ae]+r+m*$"),         # er, erm, errm, ah, ahh
-            re.compile(r"^a+h+$"),              # ah, ahh, ahhh
-        ]
+        strong_fillers: set[str] = set()
+        contextual_fillers: set[str] = set()
 
-        strong_fillers = {
-            "um", "uh", "uhh", "uhm", "umm", "er", "erm", "ah", "ahh",
-            "hmm", "hm", "mhm", "mmhm", "mmhmm", "mm", "mmm", "uhhuh", "uhhuhh", "uhhuhhh",
-        }
-        contextual_fillers = {
-            "like", "basically", "actually", "literally", "right", "so",
-            "well", "yeah", "okay", "ok", "just", "really",
-            "anyway", "anyways", "whatever",
-        }
-        # Add any custom fillers from settings (single-word ones)
+        # Custom single-word fillers that are not true hesitation tokens stay contextual.
         for f in custom_fillers:
             if " " not in f:
-                strong_fillers.add(f.lower())
+                cleaned = self._clean_filler_token(f)
+                if not cleaned:
+                    continue
+                if self._hesitation_family(cleaned) in allowed_families:
+                    strong_fillers.add(cleaned)
+                else:
+                    contextual_fillers.add(cleaned)
 
         # Multi-word filler phrases
         multi_fillers = [
@@ -859,7 +1058,7 @@ class AudioService:
                     multi_fillers.append(parts)
 
         def _clean(text: str) -> str:
-            return re.sub(r"[^a-z-]", "", text.lower())
+            return self._clean_filler_token(text)
 
         def _frame_span(word_data: dict) -> int | None:
             start_frame = word_data.get("start_frame")
@@ -877,18 +1076,23 @@ class AudioService:
             duration = max(0.0, end - start)
             probability = float(word_data.get("probability", 1.0) or 1.0)
             frame_span = _frame_span(word_data)
-            gap_before = max(0.0, start - float(prev_word.get("end", start))) if prev_word else 999.0
-            gap_after = max(0.0, float(next_word.get("start", end)) - end) if next_word else 999.0
-            is_short = duration <= 0.85 and (
+            gap_before = max(0.0, start - float(prev_word.get("end", start))) if prev_word else 0.0
+            gap_after = max(0.0, float(next_word.get("start", end)) - end) if next_word else 0.0
+            has_pause = gap_before >= 0.05 or gap_after >= 0.05
+            is_short = duration <= 0.45 and (
                 duration >= 0.08 or (frame_span is not None and frame_span >= min_hesitation_frames)
             )
-            return is_short and (
-                gap_before >= 0.02 or gap_after >= 0.02 or probability < 0.88 or not prev_word or not next_word
-            )
+            return is_short and has_pause and (probability < 0.9 or duration <= 0.2)
 
         detections = []
         words = transcript.get("words", [])
         detected_indices: set[int] = set()  # Track which word indices are already detected
+
+        logger.debug(
+            "detect_filler_words: scanning %d words, strong_fillers=%s",
+            len(words),
+            sorted(strong_fillers),
+        )
 
         # Single-word detection
         for i, word_data in enumerate(words):
@@ -950,6 +1154,12 @@ class AudioService:
                     })
 
         detections.sort(key=lambda d: d["start"])
+        logger.info(
+            "detect_filler_words: found %d fillers in %d words: %s",
+            len(detections),
+            len(words),
+            [(d["word"], round(float(d["start"]), 2)) for d in detections[:20]],
+        )
         detected_word_indices = set(detected_indices)
 
         def _find_neighbor_word(start_index: int, step: int) -> dict | None:
@@ -991,10 +1201,11 @@ class AudioService:
         self,
         audio_path: str,
         transcript: dict,
-        min_duration_ms: int = 80,
-        max_duration_ms: int = 650,
-        min_gap_ms: int = 20,
-        max_gap_ms: int = 900,
+        filler_words: list[str] | None = None,
+        min_duration_ms: int = 95,
+        max_duration_ms: int = 340,
+        min_gap_ms: int = 45,
+        max_gap_ms: int = 750,
         sample_rate: int = 16000,
         hop_ms: int = 10,
     ) -> list[dict]:
@@ -1002,14 +1213,18 @@ class AudioService:
         Recover likely filler hesitations that the transcript missed entirely.
 
         This looks for short voiced speech islands inside transcript gaps and
-        returns them as generic filler markers. It is intentionally conservative:
-        candidates must live in word gaps and match low-complexity voiced speech
-        characteristics, which helps avoid turning random noise or clipped
-        consonants into false filler detections.
+        returns them as confident `um` / `uh` markers. It is intentionally
+        precision-biased: candidates must live in real word gaps, avoid
+        repetition/stutter contexts, and match a tight low-complexity voiced
+        hesitation profile.
         """
         try:
             import librosa
         except Exception:
+            return []
+
+        allowed_families = self._allowed_hesitation_families(filler_words)
+        if not allowed_families:
             return []
 
         transcript_words = [
@@ -1134,11 +1349,16 @@ class AudioService:
                 intervals.append((float(times[run_start]), float(times[-1] + hop_seconds)))
             return intervals
 
-        gap_windows: list[tuple[float, float, str]] = []
+        gap_windows: list[dict[str, Any]] = []
         first_word = sorted_words[0]
         if first_word["start"] >= min_gap_seconds:
             lead_end = min(first_word["start"], max_gap_seconds)
-            gap_windows.append((0.0, lead_end, f"before '{first_word['word']}'"))
+            gap_windows.append({
+                "start": 0.0,
+                "end": lead_end,
+                "context": f"before '{first_word['word']}'",
+                "next_word": first_word,
+            })
 
         for prev_word, next_word in zip(sorted_words, sorted_words[1:]):
             gap_start = max(0.0, float(prev_word["end"]))
@@ -1146,19 +1366,42 @@ class AudioService:
             gap_duration = gap_end - gap_start
             if gap_duration < min_gap_seconds or gap_duration > max_gap_seconds:
                 continue
-            gap_windows.append((gap_start, gap_end, f"between '{prev_word['word']}' and '{next_word['word']}'"))
+            gap_windows.append({
+                "start": gap_start,
+                "end": gap_end,
+                "context": f"between '{prev_word['word']}' and '{next_word['word']}'",
+                "prev_word": prev_word,
+                "next_word": next_word,
+            })
 
         last_word = sorted_words[-1]
         tail_gap = duration_seconds - float(last_word["end"])
         if tail_gap >= min_gap_seconds:
             tail_start = max(float(last_word["end"]), duration_seconds - max_gap_seconds)
-            gap_windows.append((tail_start, duration_seconds, f"after '{last_word['word']}'"))
+            gap_windows.append({
+                "start": tail_start,
+                "end": duration_seconds,
+                "context": f"after '{last_word['word']}'",
+                "prev_word": last_word,
+            })
 
         if not gap_windows:
             return []
 
         detections: list[dict] = []
-        for gap_start, gap_end, context in gap_windows:
+        for gap in gap_windows:
+            gap_start = float(gap["start"])
+            gap_end = float(gap["end"])
+            context = str(gap["context"])
+            prev_word = gap.get("prev_word")
+            next_word = gap.get("next_word")
+            if self._is_repetition_or_stutter_context(prev_word, next_word):
+                continue
+
+            gap_duration = gap_end - gap_start
+            if gap_duration < min_gap_seconds or gap_duration > max_gap_seconds:
+                continue
+
             context_start = max(0.0, gap_start - hop_seconds)
             context_end = min(duration_seconds, gap_end + hop_seconds)
             idx = np.where((times >= context_start) & (times <= context_end))[0]
@@ -1178,11 +1421,11 @@ class AudioService:
                 gap_mask
                 & (speech_score >= local_speech_threshold)
                 & (dbfs >= local_db_floor)
-                & (flatness <= 0.50)
-                & (zcr <= 0.26)
-                & (centroid <= 2400.0)
-                & (rolloff <= 4200.0)
-                & (high_band_ratio <= 0.33)
+                & (flatness <= 0.42)
+                & (zcr <= 0.19)
+                & (centroid <= 2050.0)
+                & (rolloff <= 3400.0)
+                & (high_band_ratio <= 0.22)
             )
             if not np.any(candidate_mask):
                 continue
@@ -1218,12 +1461,41 @@ class AudioService:
                 if overlaps_existing:
                     continue
 
+                estimated_label = self._estimate_audio_hesitation_label(
+                    allowed_families,
+                    duration,
+                    avg_centroid,
+                    avg_rolloff,
+                    avg_zcr,
+                    avg_high_band,
+                )
+                if estimated_label not in {"um", "uh"}:
+                    continue
+                if not self._matches_confident_hesitation_family(
+                    estimated_label,
+                    duration,
+                    avg_centroid,
+                    avg_rolloff,
+                    avg_zcr,
+                    avg_high_band,
+                    avg_flatness,
+                ):
+                    continue
+
                 detections.append({
-                    "word": "[filler]",
+                    "word": estimated_label,
                     "start": round(start, 4),
                     "end": round(end, 4),
                     "duration": round(duration, 4),
                     "context": context,
+                    "prev_word": prev_word.get("word") if isinstance(prev_word, dict) else None,
+                    "prev_word_end": prev_word.get("end") if isinstance(prev_word, dict) else None,
+                    "prev_word_end_frame": prev_word.get("end_frame") if isinstance(prev_word, dict) else None,
+                    "prev_word_source_end_frame": prev_word.get("source_end_frame") if isinstance(prev_word, dict) else None,
+                    "next_word": next_word.get("word") if isinstance(next_word, dict) else None,
+                    "next_word_start": next_word.get("start") if isinstance(next_word, dict) else None,
+                    "next_word_start_frame": next_word.get("start_frame") if isinstance(next_word, dict) else None,
+                    "next_word_source_start_frame": next_word.get("source_start_frame") if isinstance(next_word, dict) else None,
                     "selected": True,
                     "kind": "audio_hesitation",
                 })
@@ -1243,6 +1515,297 @@ class AudioService:
                 merged.append(detection)
 
         return merged
+
+    def detect_attached_hesitation_onsets(
+        self,
+        transcript: dict,
+        filler_words: list[str] | None = None,
+        profile: dict[str, Any] | None = None,
+        min_duration_ms: int = 70,
+        max_duration_ms: int = 260,
+        max_prefix_ms: int = 280,
+        max_backtrack_ms: int = 80,
+        min_remaining_word_ms: int = 90,
+    ) -> list[dict]:
+        """
+        Recover likely attached `uh`/`um` hesitations that were blended into
+        the start of the following spoken word instead of becoming their own
+        transcript token.
+
+        This pass is intentionally narrow. It only targets `uh`/`um` families,
+        only inspects the onset of existing spoken words, and only accepts a
+        detection when the onset looks like a low-complexity hesitation that
+        then shifts into clearer continuation speech.
+        """
+        allowed_families = self._allowed_hesitation_families(filler_words) & {"um", "uh"}
+        if not allowed_families or profile is None:
+            return []
+
+        times = profile.get("times")
+        speech_score = profile.get("speech_score")
+        dbfs = profile.get("dbfs")
+        flatness = profile.get("flatness")
+        centroid = profile.get("centroid")
+        rolloff = profile.get("rolloff")
+        zcr = profile.get("zcr")
+        high_band_ratio = profile.get("high_band_ratio")
+        duration = float(profile.get("duration") or 0.0)
+        hop_seconds = float(profile.get("hop_seconds") or 0.0)
+        if (
+            times is None or speech_score is None or dbfs is None or flatness is None
+            or centroid is None or rolloff is None or zcr is None or high_band_ratio is None
+            or hop_seconds <= 0.0 or duration <= 0.0
+        ):
+            return []
+
+        transcript_words = []
+        for raw_word in (transcript.get("words", []) or []):
+            text = str(raw_word.get("word", "")).strip()
+            if not text or text.startswith("["):
+                continue
+            try:
+                start = max(0.0, min(duration, float(raw_word.get("start", 0.0))))
+                end = max(start, min(duration, float(raw_word.get("end", start))))
+            except Exception:
+                continue
+            transcript_words.append({
+                **raw_word,
+                "word": text,
+                "start": start,
+                "end": end,
+            })
+
+        if not transcript_words:
+            return []
+
+        transcript_words.sort(key=lambda word: (float(word["start"]), float(word["end"])))
+
+        global_speech_threshold = max(
+            float(np.percentile(speech_score, 48)),
+            float(np.percentile(speech_score, 60)) * 0.74,
+        )
+        global_db_floor = max(-62.0, float(np.percentile(dbfs, 24)) - 5.0)
+        min_duration_seconds = min_duration_ms / 1000.0
+        max_duration_seconds = max_duration_ms / 1000.0
+        max_prefix_seconds = max_prefix_ms / 1000.0
+        max_backtrack_seconds = max_backtrack_ms / 1000.0
+        min_remaining_word_seconds = min_remaining_word_ms / 1000.0
+        min_frames = max(2, int(round(min_duration_seconds / max(hop_seconds, 1e-6))))
+
+        detections: list[dict] = []
+        for index, word in enumerate(transcript_words):
+            cleaned = self._clean_filler_token(word["word"])
+            if not cleaned:
+                continue
+            if self._hesitation_family(cleaned) in allowed_families:
+                # Already a standalone hesitation token.
+                continue
+
+            word_start = float(word["start"])
+            word_end = float(word["end"])
+            word_duration = word_end - word_start
+            if word_duration < (min_duration_seconds + min_remaining_word_seconds):
+                continue
+
+            prev_word = transcript_words[index - 1] if index > 0 else None
+            next_word = transcript_words[index + 1] if index < len(transcript_words) - 1 else None
+            prev_word_end = float(prev_word["end"]) if prev_word is not None else 0.0
+            prev_cleaned = self._clean_filler_token(prev_word["word"]) if isinstance(prev_word, dict) else ""
+            next_cleaned = self._clean_filler_token(next_word["word"]) if isinstance(next_word, dict) else ""
+            if self._is_repetition_or_stutter_context(prev_word, word) or self._is_repetition_or_stutter_context(word, next_word):
+                continue
+            if (prev_cleaned and prev_cleaned == cleaned) or (next_cleaned and next_cleaned == cleaned):
+                # Immediate repetitions are handled by repetition detection; do not
+                # reinterpret them as onset fillers.
+                continue
+
+            search_start = max(prev_word_end, word_start - max_backtrack_seconds)
+            search_end = min(
+                duration,
+                word_start + min(max_prefix_seconds, max(word_duration * 0.55, min_duration_seconds + 0.03)),
+            )
+            if search_end - search_start < min_duration_seconds:
+                continue
+
+            window_idx = np.where((times >= search_start) & (times <= search_end))[0]
+            if window_idx.size < min_frames:
+                continue
+
+            local_speech = speech_score[window_idx]
+            local_dbfs = dbfs[window_idx]
+            speech_threshold = max(
+                global_speech_threshold * 0.92,
+                float(np.percentile(local_speech, 55)) * 0.78,
+            )
+            db_floor = max(
+                global_db_floor,
+                float(np.percentile(local_dbfs, 35)) - 8.0,
+            )
+
+            base_mask = (times >= search_start) & (times <= search_end)
+            onset_mask = (
+                base_mask
+                & (speech_score >= speech_threshold)
+                & (dbfs >= db_floor)
+                & (flatness <= 0.34)
+                & (zcr <= 0.12)
+                & (centroid <= 1550.0)
+                & (rolloff <= 2500.0)
+                & (high_band_ratio <= 0.12)
+            )
+            candidate_intervals = self._merge_nearby_intervals(
+                self._extract_intervals_from_mask(
+                    onset_mask,
+                    times,
+                    hop_seconds,
+                    min_frames=min_frames,
+                ),
+                max_gap_seconds=0.02,
+            )
+            if not candidate_intervals:
+                continue
+
+            best_detection = None
+            best_score = float("-inf")
+
+            for cand_start, cand_end in candidate_intervals:
+                cand_start = max(search_start, float(cand_start))
+                cand_end = min(search_end, float(cand_end))
+                candidate_duration = cand_end - cand_start
+                if candidate_duration < min_duration_seconds or candidate_duration > max_duration_seconds:
+                    continue
+                start_slop_seconds = max(0.02, hop_seconds * 2.0)
+                if cand_start > word_start + start_slop_seconds:
+                    continue
+                if cand_end <= word_start + 0.035:
+                    continue
+                max_prefix_end = word_start + min(0.16, max(0.09, word_duration * 0.28))
+                if cand_end > max_prefix_end:
+                    continue
+                if word_end - cand_end < min_remaining_word_seconds:
+                    continue
+
+                candidate_idx = np.where((times >= cand_start) & (times <= cand_end))[0]
+                if candidate_idx.size < min_frames:
+                    continue
+
+                continuation_start = min(word_end, cand_end + 0.01)
+                continuation_end = min(word_end, cand_end + 0.14)
+                continuation_idx = np.where((times >= continuation_start) & (times <= continuation_end))[0]
+                if continuation_idx.size < 2:
+                    continue
+
+                candidate_speech = float(np.mean(speech_score[candidate_idx]))
+                continuation_speech = float(np.mean(speech_score[continuation_idx]))
+                if continuation_speech < speech_threshold * 0.72:
+                    continue
+                if continuation_speech < candidate_speech + 0.03:
+                    continue
+
+                avg_centroid = float(np.mean(centroid[candidate_idx]))
+                avg_rolloff = float(np.mean(rolloff[candidate_idx]))
+                avg_flatness = float(np.mean(flatness[candidate_idx]))
+                avg_zcr = float(np.mean(zcr[candidate_idx]))
+                avg_high_band = float(np.mean(high_band_ratio[candidate_idx]))
+                if avg_flatness > 0.38 or avg_zcr > 0.16 or avg_high_band > 0.18:
+                    continue
+
+                continuation_centroid = float(np.mean(centroid[continuation_idx]))
+                continuation_rolloff = float(np.mean(rolloff[continuation_idx]))
+                continuation_zcr = float(np.mean(zcr[continuation_idx]))
+                continuation_high_band = float(np.mean(high_band_ratio[continuation_idx]))
+                has_spectral_shift = (
+                    continuation_centroid >= avg_centroid + 120.0
+                    or continuation_rolloff >= avg_rolloff + 180.0
+                    or continuation_zcr >= avg_zcr + 0.015
+                    or continuation_high_band >= avg_high_band + 0.015
+                )
+                if not has_spectral_shift:
+                    continue
+
+                estimated_label = self._estimate_audio_hesitation_label(
+                    allowed_families,
+                    candidate_duration,
+                    avg_centroid,
+                    avg_rolloff,
+                    avg_zcr,
+                    avg_high_band,
+                )
+                if (
+                    estimated_label == "um"
+                    and candidate_duration <= 0.16
+                    and not (
+                        avg_centroid <= 1250.0
+                        and avg_rolloff <= 2000.0
+                        and avg_high_band <= 0.10
+                    )
+                ):
+                    estimated_label = "uh"
+                if estimated_label not in {"um", "uh"}:
+                    continue
+
+                score = (
+                    candidate_duration * 2.0
+                    + max(0.0, continuation_centroid - avg_centroid) / 1000.0
+                    + max(0.0, continuation_rolloff - avg_rolloff) / 1500.0
+                    + max(0.0, continuation_high_band - avg_high_band) * 4.0
+                )
+
+                detection = {
+                    "word": estimated_label,
+                    "start": round(cand_start, 4),
+                    "end": round(cand_end, 4),
+                    "duration": round(candidate_duration, 4),
+                    "context": f"attached to '{word['word']}'",
+                    "kind": "audio_hesitation",
+                    "attachment": "word_onset",
+                    "attached_word": word.get("word"),
+                    "attached_word_start": word_start,
+                    "attached_word_end": word_end,
+                    "attached_word_start_frame": word.get("start_frame"),
+                    "attached_word_source_start_frame": word.get("source_start_frame"),
+                    "selected": True,
+                    "boundary_source": "waveform",
+                    "prev_word": prev_word.get("word") if isinstance(prev_word, dict) else None,
+                    "prev_word_end": prev_word.get("end") if isinstance(prev_word, dict) else None,
+                    "prev_word_end_frame": prev_word.get("end_frame") if isinstance(prev_word, dict) else None,
+                    "prev_word_source_end_frame": prev_word.get("source_end_frame") if isinstance(prev_word, dict) else None,
+                }
+
+                detection["start_frame"] = self._estimate_word_relative_frame(
+                    word,
+                    cand_start,
+                    "start_frame",
+                    "end_frame",
+                )
+                detection["end_frame"] = self._estimate_word_relative_frame(
+                    word,
+                    cand_end,
+                    "start_frame",
+                    "end_frame",
+                )
+                detection["source_start_frame"] = self._estimate_word_relative_frame(
+                    word,
+                    cand_start,
+                    "source_start_frame",
+                    "source_end_frame",
+                )
+                detection["source_end_frame"] = self._estimate_word_relative_frame(
+                    word,
+                    cand_end,
+                    "source_start_frame",
+                    "source_end_frame",
+                )
+
+                if score > best_score:
+                    best_detection = detection
+                    best_score = score
+
+            if best_detection is not None:
+                detections.append(best_detection)
+
+        detections.sort(key=lambda detection: (float(detection["start"]), float(detection["end"])))
+        return detections
 
     @staticmethod
     def _robust_norm(values: np.ndarray) -> np.ndarray:
@@ -1933,6 +2496,12 @@ class AudioService:
                 "next_word_start",
                 "next_word_start_frame",
                 "next_word_source_start_frame",
+                "attachment",
+                "attached_word",
+                "attached_word_start",
+                "attached_word_end",
+                "attached_word_start_frame",
+                "attached_word_source_start_frame",
                 "source_start_frame",
                 "source_end_frame",
             ):
@@ -1955,8 +2524,30 @@ class AudioService:
         profile: dict[str, Any] | None = None,
     ) -> list[dict]:
         profile = profile or self.build_waveform_profile(audio_path)
+        audio_duration = profile["duration"] if profile else None
+        logger.info(
+            "analyze_filler_candidates: audio=%s, words=%d, audio_duration=%.2fs",
+            audio_path,
+            len(transcript.get("words", [])),
+            audio_duration or 0.0,
+        )
         transcript_fillers = self.detect_filler_words(transcript, filler_words)
-        audio_hesitations = self.detect_hesitation_audio_candidates(audio_path, transcript)
+        audio_hesitations = self.detect_hesitation_audio_candidates(
+            audio_path,
+            transcript,
+            filler_words=filler_words,
+        )
+        attached_hesitations = self.detect_attached_hesitation_onsets(
+            transcript,
+            filler_words=filler_words,
+            profile=profile,
+        )
+        logger.info(
+            "analyze_filler_candidates: transcript_fillers=%d, audio_hesitations=%d, attached_hesitations=%d",
+            len(transcript_fillers),
+            len(audio_hesitations),
+            len(attached_hesitations),
+        )
         refined_fillers = self.refine_filler_segments_to_waveform(
             audio_path,
             transcript_fillers,
@@ -1967,7 +2558,7 @@ class AudioService:
             audio_hesitations,
             profile=profile,
         )
-        return self.merge_filler_detections([*refined_fillers, *refined_hesitations])
+        return self.merge_filler_detections([*refined_fillers, *refined_hesitations, *attached_hesitations])
 
     def refine_silence_segments_to_waveform(
         self,

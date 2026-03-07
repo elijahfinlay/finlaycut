@@ -9,6 +9,7 @@ import { apiFetch } from '../../hooks/useApi'
 import { useProgress } from '../../hooks/useWebSocket'
 import { useFeatureDataStore } from '../../stores/featureDataStore'
 import { useOperationStore } from '../../stores/operationStore'
+import { useSettingsStore } from '../../stores/settingsStore'
 
 interface FillerDetection {
   word: string
@@ -39,6 +40,7 @@ export function FillerWordRemoval() {
 
   const op = useOperationStore((s) => s.operations[OP_NAME])
   const isRunning = op?.status === 'running'
+  const fillerWords = useSettingsStore((s) => s.fillerWords)
 
   const [detections, setDetections] = useState<FillerDetection[]>(storedDetections)
   const [applying, setApplying] = useState(false)
@@ -95,7 +97,10 @@ export function FillerWordRemoval() {
 
       const data = await apiFetch('/api/filler-words/analyze', {
         method: 'POST',
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          ...body,
+          filler_words: fillerWords,
+        }),
         signal: controller.signal,
       })
       if (data.error) {
@@ -207,7 +212,7 @@ export function FillerWordRemoval() {
       <div>
         <h2 className="feature-title">Filler Word Removal</h2>
         <p className="feature-description">
-          Detect and remove filler words like "um", "uh", "like", "you know" from your timeline.
+          Detect and remove hesitation fillers like "um", "uh", "erm", and "[filler]" from your timeline.
         </p>
       </div>
 
@@ -274,7 +279,9 @@ export function FillerWordRemoval() {
                     <span
                       className={`font-semibold ${det.selected ? 'text-resolve-warning' : 'text-resolve-textMuted'}`}
                     >
-                      {det.kind === 'audio_hesitation' ? '[filler]' : `"${det.word}"`}
+                      {det.kind === 'audio_hesitation'
+                        ? `"${det.word && det.word !== '[filler]' ? det.word : 'filler'}"`
+                        : `"${det.word}"`}
                     </span>
                     <span className="font-mono text-xs text-resolve-textMuted">
                       {formatTime(det.start)}

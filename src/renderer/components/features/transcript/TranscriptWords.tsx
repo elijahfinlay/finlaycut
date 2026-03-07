@@ -84,6 +84,10 @@ export function TranscriptWords(props: TranscriptWordsProps) {
     const markerFrames = Math.round(markerDuration * fps)
     const markerStart = formatPreciseTimestamp(word.start)
     const markerEnd = formatPreciseTimestamp(word.end)
+    const audioFillerText =
+      fillerMarker && word.word && word.word !== '[filler]'
+        ? word.word
+        : 'filler'
     const fillerTimestampLabel =
       isFiller && !silenceMarker && !fillerMarker
         ? `${markerStart}-${markerEnd}`
@@ -91,10 +95,19 @@ export function TranscriptWords(props: TranscriptWordsProps) {
     const displayLabel = silenceMarker
       ? `[silence ${markerStart}-${markerEnd} / ${markerFrames}f]`
       : fillerMarker
-        ? `[filler ${markerStart}-${markerEnd} / ${markerFrames}f]`
+        ? audioFillerText
         : word.word
     const displayContent: React.ReactNode =
-      fillerTimestampLabel && !fillerMarker && !silenceMarker
+      fillerMarker
+        ? (
+          <>
+            <span>{displayLabel}</span>
+            <span className="ml-1 rounded bg-orange-500/15 px-1 py-[1px] text-[10px] font-mono text-orange-300">
+              {`${markerStart}-${markerEnd} / ${markerFrames}f`}
+            </span>
+          </>
+        )
+        : fillerTimestampLabel && !silenceMarker
         ? (
           <>
             <span>{word.word}</span>
@@ -109,7 +122,7 @@ export function TranscriptWords(props: TranscriptWordsProps) {
     const wordTitle = silenceMarker
       ? `Silence: ${markerDuration.toFixed(2)}s (${markerFrames} frames) | ${markerStart} - ${markerEnd}`
       : fillerMarker
-        ? `Recovered filler: ${markerDuration.toFixed(2)}s (${markerFrames} frames) | ${markerStart} - ${markerEnd}`
+        ? `Recovered filler "${audioFillerText}": ${markerDuration.toFixed(2)}s (${markerFrames} frames) | ${markerStart} - ${markerEnd}`
       : `${formatTimestamp(word.start)} - ${formatTimestamp(word.end)}${fillerTag}${speakerTag}`
 
     elements.push(

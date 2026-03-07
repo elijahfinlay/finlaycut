@@ -18,6 +18,8 @@ export interface TranscriptToolbarProps {
   findingFillers: boolean
   onCutFillers: () => void
   hasDetectedFillers: boolean
+  onMarkRepetitions: () => void
+  findingRepetitions: boolean
   autoDetectFillers: boolean
   onToggleAutoDetect: () => void
   fillerCount: number
@@ -30,6 +32,8 @@ export interface TranscriptToolbarProps {
   showSpeakers: boolean
   onToggleScriptPanel: () => void
   showScriptPanel: boolean
+  onClearTranscript: () => void
+  clearTranscriptDisabled: boolean
 
   allSelected: boolean
   onSelectAll: () => void
@@ -149,6 +153,16 @@ export function TranscriptToolbar(props: TranscriptToolbarProps) {
           <Button
             variant="ghost"
             size="sm"
+            onClick={props.onMarkRepetitions}
+            loading={props.findingRepetitions}
+            disabled={props.transcriptMutationBlocked}
+            title="Find retakes and mark the non-best takes for cutting"
+          >
+            Retakes
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={props.onToggleAutoDetect}
             className={props.autoDetectFillers ? 'border border-orange-500/50 text-orange-400' : ''}
             title="Highlight filler words and repeated consecutive words"
@@ -193,9 +207,21 @@ export function TranscriptToolbar(props: TranscriptToolbarProps) {
 
         <div className="flex-1" />
 
-        <Button variant="ghost" size="sm" onClick={props.onExport} title="Export transcript as text">
-          Export
-        </Button>
+        <ButtonGroup>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={props.onClearTranscript}
+            disabled={props.clearTranscriptDisabled}
+            className="border border-resolve-error/30 text-resolve-error hover:bg-resolve-error/10"
+            title="Clear the current transcript so you can transcribe again from a clean slate"
+          >
+            Clear Transcript
+          </Button>
+          <Button variant="ghost" size="sm" onClick={props.onExport} title="Export transcript as text">
+            Export
+          </Button>
+        </ButtonGroup>
       </div>
 
       {/* Stats line */}

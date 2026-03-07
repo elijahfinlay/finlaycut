@@ -8,6 +8,12 @@ from typing import Optional
 logger = logging.getLogger("finlaycut.config")
 
 SETTINGS_FILE = Path.home() / ".finlaycut" / "settings.json"
+LEGACY_FILLER_WORDS = [
+    "um", "uh", "uh-huh", "uhh", "uhm", "umm",
+    "hmm", "hm", "mmhmm", "mhm", "mm", "mmm",
+    "huh", "er", "erm", "ah", "ahh",
+]
+DEFAULT_FILLER_WORDS = ["um", "uh", "uhm", "umm", "uhh"]
 
 # Fields that are persisted to disk
 PERSISTED_FIELDS = [
@@ -60,11 +66,7 @@ class Settings(BaseSettings):
     silence_padding_ms: int = 100
 
     # Filler Words
-    filler_words: list[str] = [
-        "um", "uh", "like", "you know", "basically", "actually",
-        "literally", "right", "so", "well", "I mean", "kind of",
-        "sort of", "er", "ah"
-    ]
+    filler_words: list[str] = DEFAULT_FILLER_WORDS.copy()
 
     # AI Backend
     ai_backend: str = "ollama"  # "ollama" or "claude"
@@ -105,11 +107,17 @@ class Settings(BaseSettings):
         """Load persisted settings from disk on startup."""
         if not SETTINGS_FILE.exists():
             return
+        migrated = False
         try:
             data = json.loads(SETTINGS_FILE.read_text())
+            if data.get("filler_words") == LEGACY_FILLER_WORDS:
+                data["filler_words"] = DEFAULT_FILLER_WORDS.copy()
+                migrated = True
             for field in PERSISTED_FIELDS:
                 if field in data and data[field] is not None:
                     setattr(self, field, data[field])
+            if migrated:
+                self.save_to_disk()
             logger.info("Settings loaded from %s", SETTINGS_FILE)
         except Exception as e:
             logger.error("Failed to load settings: %s", e)

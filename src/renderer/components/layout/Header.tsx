@@ -1,23 +1,70 @@
 import React, { useState } from 'react'
 import { clsx } from 'clsx'
+import { toast } from 'sonner'
 import { useProjectStore } from '../../stores/projectStore'
 import { apiFetch } from '../../hooks/useApi'
 
 export function Header() {
-  const { connected, projectName, timelineName, framerate, resolution, videoTracks, audioTracks, refreshResolve } =
-    useProjectStore()
+  const {
+    connected,
+    projectName,
+    timelineName,
+    framerate,
+    resolution,
+    videoTracks,
+    audioTracks,
+    pendingTimelineName,
+    refreshResolve,
+    hasPendingResolveChange,
+  } = useProjectStore()
   const [retrying, setRetrying] = useState(false)
+  const [linking, setLinking] = useState(false)
+  const statusDotClass = !connected
+    ? 'bg-resolve-error'
+    : hasPendingResolveChange
+      ? 'bg-resolve-warning'
+      : 'bg-resolve-success'
+  const statusDotTitle = !connected
+    ? 'Resolve disconnected'
+    : hasPendingResolveChange
+      ? 'Tool is pinned to a different timeline than the one currently open in Resolve'
+      : 'Tool is synced to the currently open Resolve timeline'
+  const canLinkClips = connected && Boolean(timelineName) && !hasPendingResolveChange && !linking
 
   const handleRetryConnect = async () => {
     if (!refreshResolve) return
     setRetrying(true)
     try {
-      await apiFetch('/api/resolve/reconnect', { method: 'POST' })
+      if (!connected) {
+        await apiFetch('/api/resolve/reconnect', { method: 'POST' })
+      }
       await refreshResolve()
     } catch {
       // Ignore errors and let regular polling continue.
     } finally {
       setRetrying(false)
+    }
+  }
+
+  const handleLinkClips = async () => {
+    if (!canLinkClips) {
+      if (hasPendingResolveChange) {
+        toast.info(`Reconnect to ${pendingTimelineName || 'the current Resolve timeline'} before linking clips.`)
+      }
+      return
+    }
+
+    setLinking(true)
+    try {
+      const data = await apiFetch('/api/resolve/link-clips', { method: 'POST' })
+      if (data?.error || data?.success === false) {
+        throw new Error(data?.error || 'Could not link clips on the current timeline')
+      }
+      toast.success(data?.message || 'Linked matching video and audio clips')
+    } catch (err: any) {
+      toast.error(err?.message || 'Could not link clips on the current timeline')
+    } finally {
+      setLinking(false)
     }
   }
 
@@ -36,27 +83,26 @@ export function Header() {
           <div
             className={clsx(
               'w-2 h-2 rounded-full',
-              connected ? 'bg-resolve-success' : 'bg-resolve-error'
+              statusDotClass
             )}
+            title={statusDotTitle}
           />
           <span className="text-xs text-resolve-textMuted">
             {connected ? 'Connected' : 'Disconnected'}
           </span>
-          {!connected && (
-            <button
-              onClick={handleRetryConnect}
-              disabled={retrying}
-              className={clsx(
-                'px-2 py-0.5 text-xs rounded transition-colors',
-                retrying
-                  ? 'bg-resolve-border text-resolve-textMuted cursor-wait'
-                  : 'bg-resolve-accent/15 text-resolve-accent hover:bg-resolve-accent/25'
-              )}
-              style={{ WebkitAppRegion: 'no-drag' } as any}
-            >
-              {retrying ? 'Retrying...' : 'Retry'}
-            </button>
-          )}
+          <button
+            onClick={handleRetryConnect}
+            disabled={retrying}
+            className={clsx(
+              'px-2 py-0.5 text-xs rounded transition-colors',
+              retrying
+                ? 'bg-resolve-border text-resolve-textMuted cursor-wait'
+                : 'bg-resolve-accent/15 text-resolve-accent hover:bg-resolve-accent/25'
+            )}
+            style={{ WebkitAppRegion: 'no-drag' } as any}
+          >
+            {retrying ? (connected ? 'Reconnecting...' : 'Retrying...') : connected ? 'Reconnect' : 'Retry'}
+          </button>
         </div>
 
         {connected && projectName && (
@@ -66,6 +112,30 @@ export function Header() {
               {projectName}
             </span>
           </>
+        )}
+        {connected && (
+          <button
+            onClick={handleLinkClips}
+            disabled={!canLinkClips}
+            className={clsx(
+              'px-2 py-0.5 text-xs rounded transition-colors',
+              canLinkClips
+                ? 'bg-resolve-success/15 text-resolve-success hover:bg-resolve-success/25'
+                : 'bg-resolve-border text-resolve-textMuted cursor-not-allowed'
+            )}
+            title={
+              !connected
+                ? 'Resolve disconnected'
+                : hasPendingResolveChange
+                  ? 'Reconnect to the currently open Resolve timeline before linking clips'
+                  : timelineName
+                    ? 'Link matching video and audio clips on the current timeline'
+                    : 'No timeline open in Resolve'
+            }
+            style={{ WebkitAppRegion: 'no-drag' } as any}
+          >
+            {linking ? 'Linking...' : 'Link Clips'}
+          </button>
         )}
         <div className="flex-1" />
       </div>

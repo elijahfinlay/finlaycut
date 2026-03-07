@@ -1,6 +1,6 @@
 {
   "name": "finlaycut",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AI-powered video editing assistant for DaVinci Resolve",
   "main": "./out/main/index.js",
   "author": "Elijah Finlay",

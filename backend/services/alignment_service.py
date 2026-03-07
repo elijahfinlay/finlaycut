@@ -118,8 +118,25 @@ class AlignmentService:
         seg_end = float(segment.get("end", 0))
         words = segment.get("words", [])
 
+        # If no word-level data exists (WhisperX transcribe doesn't include it),
+        # synthesize words from the segment text so alignment can proceed.
         if not words:
-            return dict(segment)
+            text = segment.get("text", "").strip()
+            if not text:
+                return dict(segment)
+            raw_tokens = text.split()
+            span = max(0.0, seg_end - seg_start)
+            step = span / max(len(raw_tokens), 1)
+            cursor = seg_start
+            words = []
+            for token in raw_tokens:
+                words.append({
+                    "word": token,
+                    "start": cursor,
+                    "end": min(seg_end, cursor + step),
+                    "probability": 1.0,
+                })
+                cursor = min(seg_end, cursor + step)
 
         # Clean each word for the tokenizer (lowercase letters only)
         cleaned_words = []

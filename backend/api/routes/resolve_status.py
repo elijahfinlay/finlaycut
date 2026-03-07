@@ -1,5 +1,6 @@
 """Resolve connection status and project info endpoints."""
 
+import asyncio
 import subprocess
 import logging
 import time
@@ -26,6 +27,23 @@ async def reconnect_resolve():
     return {
         "success": success,
         "status": resolve_service.get_status()
+    }
+
+
+@router.post("/link-clips")
+async def link_clips():
+    """Link matching selected timeline clips via Resolve's native link action."""
+    if not resolve_service.connected:
+        return {"success": False, "error": "Not connected to DaVinci Resolve"}
+
+    result = await asyncio.to_thread(resolve_service.link_all_clips)
+    if not result.get("success"):
+        return {"success": False, "error": result.get("error") or "Could not link clips on the current timeline"}
+
+    return {
+        "success": True,
+        "message": f"Linked {result.get('linked_pairs', 0)} matching video and audio clip pair(s)",
+        "linked_pairs": result.get("linked_pairs", 0),
     }
 
 
