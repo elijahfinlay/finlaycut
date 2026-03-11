@@ -4,6 +4,51 @@ from unittest.mock import patch
 from services.resolve_service import ResolveService
 
 
+class _FakeTimeline:
+    def __init__(self, name: str):
+        self._name = name
+
+    def GetName(self):
+        return self._name
+
+    def GetStartFrame(self):
+        return 100
+
+    def GetEndFrame(self):
+        return 2980
+
+    def GetTrackCount(self, track_type: str):
+        return {
+            "video": 2,
+            "audio": 1,
+            "subtitle": 0,
+        }[track_type]
+
+    def GetSetting(self, key: str):
+        return {
+            "timelineFrameRate": "24",
+            "timelineResolutionWidth": "1920",
+            "timelineResolutionHeight": "1080",
+        }[key]
+
+
+class _FakeProject:
+    def __init__(self, timelines):
+        self._timelines = timelines
+
+    def GetName(self):
+        return "Pinned Project"
+
+    def GetCurrentTimeline(self):
+        return None
+
+    def GetTimelineCount(self):
+        return len(self._timelines)
+
+    def GetTimelineByIndex(self, index: int):
+        return self._timelines[index - 1]
+
+
 class ResolveServiceStatusTests(unittest.TestCase):
     def _make_service(self) -> ResolveService:
         service = ResolveService()
@@ -60,6 +105,50 @@ class ResolveServiceStatusTests(unittest.TestCase):
         self.assertFalse(status["using_cached"])
         self.assertIsNone(status["project"])
         self.assertIsNone(status["timeline"])
+
+    def test_connected_retries_when_resolve_handle_exists_but_flag_dropped(self):
+        service = ResolveService()
+        service._connected = False
+        service._resolve = object()
+
+        with patch.object(service, "try_connect", return_value=True) as try_connect:
+            self.assertTrue(service.connected)
+
+        try_connect.assert_called_once()
+
+    def test_get_current_timeline_falls_back_to_cached_timeline_name(self):
+        service = self._make_service()
+        project = _FakeProject([
+            _FakeTimeline("Timeline Z"),
+            _FakeTimeline("Timeline A"),
+        ])
+
+        with patch.object(service, "get_current_project", return_value=project):
+            timeline = service.get_current_timeline()
+
+        self.assertIsNotNone(timeline)
+        self.assertEqual(timeline.GetName(), "Timeline A")
+
+    def test_get_status_uses_recovered_timeline_when_resolve_returns_none(self):
+        service = self._make_service()
+        recovered_timeline = _FakeTimeline("Timeline A")
+
+        with (
+            patch(
+                "services.resolve_service.get_project_info",
+                return_value={
+                    "project_name": "Pinned Project",
+                    "timeline_count": 3,
+                    "current_timeline": None,
+                },
+            ),
+            patch.object(service, "get_current_timeline", return_value=recovered_timeline),
+        ):
+            status = service.get_status()
+
+        self.assertTrue(status["connected"])
+        self.assertTrue(status["using_cached"])
+        self.assertEqual(status["timeline"]["name"], "Timeline A")
 
 
 if __name__ == "__main__":

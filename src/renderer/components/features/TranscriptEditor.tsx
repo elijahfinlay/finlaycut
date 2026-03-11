@@ -31,8 +31,6 @@ import {
   isAudioFillerMarker,
   isAnalysisMarker,
   sortTranscriptWords,
-  shrinkSegmentForSafety,
-  adjustFillerSegmentForRemoval,
   isLikelyFillerWord,
   wordOverlapsSegment,
   findActiveWordIndex,
@@ -58,6 +56,49 @@ interface RepetitionTake {
 interface RepetitionGroup {
   best_index?: number
   takes?: RepetitionTake[]
+}
+
+type QuickAnalyzeStep = 'idle' | 'silences' | 'fillers' | 'retakes' | 'speakers'
+
+interface QuickAnalyzeSummary {
+  silenceCount: number
+  silenceSeconds: number
+  fillerCount: number
+  retakeGroups: number
+  retakeTakes: number
+  speakerCount: number
+  completedAt: number
+}
+
+function normalizeAppliedCutSegments(rawSegments: any[]): Segment[] {
+  return rawSegments
+    .map((raw) => ({
+      start: Number(raw?.start || 0),
+      end: Number(raw?.end || 0),
+      start_frame: typeof raw?.start_frame === 'number' ? raw.start_frame : undefined,
+      end_frame: typeof raw?.end_frame === 'number' ? raw.end_frame : undefined,
+      source_start_frame:
+        typeof raw?.source_start_frame === 'number' ? raw.source_start_frame : undefined,
+      source_end_frame:
+        typeof raw?.source_end_frame === 'number' ? raw.source_end_frame : undefined,
+      kind: typeof raw?.kind === 'string' ? raw.kind : undefined,
+      label: typeof raw?.label === 'string' ? raw.label : undefined,
+      boundary_refined:
+        typeof raw?.boundary_refined === 'boolean' ? raw.boundary_refined : undefined,
+      boundary_source:
+        typeof raw?.boundary_source === 'string' ? raw.boundary_source : undefined,
+      prev_word_end:
+        typeof raw?.prev_word_end === 'number' ? raw.prev_word_end : undefined,
+      next_word_start:
+        typeof raw?.next_word_start === 'number' ? raw.next_word_start : undefined,
+      prev_word_end_frame:
+        typeof raw?.prev_word_end_frame === 'number' ? raw.prev_word_end_frame : undefined,
+      next_word_start_frame:
+        typeof raw?.next_word_start_frame === 'number' ? raw.next_word_start_frame : undefined,
+      padding_ms: typeof raw?.padding_ms === 'number' ? raw.padding_ms : undefined,
+    }))
+    .filter((segment) => segment.end > segment.start)
+    .sort((a, b) => a.start - b.start)
 }
 
 export function TranscriptEditor() {
@@ -125,7 +166,9 @@ export function TranscriptEditor() {
   const [isReconciling, setIsReconciling] = useState(false)
   const [scriptText, setScriptText] = useState('')
   const [heldClickAction, setHeldClickAction] = useState<'cut' | 'mute' | 'keep' | null>(null)
-  const skipNextAutoFillerAnalyzeRef = useRef(false)
+  const [quickAnalyzeStep, setQuickAnalyzeStep] = useState<QuickAnalyzeStep>('idle')
+  const [quickAnalyzeSummary, setQuickAnalyzeSummary] = useState<QuickAnalyzeSummary | null>(null)
+  const pendingAutoAnalyzeTranscriptWordsRef = useRef<TranscriptWord[] | null>(null)
   const {
     framerate,
     timelineName: currentTimelineName,
@@ -149,6 +192,7 @@ export function TranscriptEditor() {
   const heldClickActionRef = useRef<'cut' | 'mute' | 'keep' | null>(null)
   const staleNotifiedRef = useRef(false)
   const recoveryHandledRef = useRef(false)
+  const mountedAtRef = useRef(Date.now())
   const staleCountRef = useRef(0)
   const isPlayingRef = useRef(false)
   const lastToggleTimeRef = useRef(0)
@@ -157,10 +201,11 @@ export function TranscriptEditor() {
     seconds: 0,
     sampledAt: performance.now(),
   })
+  const quickAnalyzeRunning = quickAnalyzeStep !== 'idle'
   const transcriptIsStale = isTranscriptSessionStale(transcriptSession)
-  const transcriptMutationBlocked = transcriptIsStale || applying || isReconciling
+  const transcriptMutationBlocked = transcriptIsStale || applying || isReconciling || quickAnalyzeRunning
   const transcriptClearBlocked =
-    transcribing || applying || isReconciling || findingFillers || findingRepetitions || findingSilences || analyzingSpeakers
+    transcribing || applying || isReconciling || findingFillers || findingRepetitions || findingSilences || analyzingSpeakers || quickAnalyzeRunning
   // Waveform viewport: null = auto (follow selection), 'full' = force full timeline, object = manual pan/zoom
   const [waveformViewport, setWaveformViewport] = useState<WaveformViewport | 'full' | null>(null)
 
@@ -475,10 +520,20 @@ export function TranscriptEditor() {
 
   useEffect(() => {
     if (recoveryHandledRef.current || !pendingTranscriptRecovery) return
+    if (pendingTranscriptRecovery.startedAt >= mountedAtRef.current) return
     recoveryHandledRef.current = true
 
+    const backupTimelineName = storedBackup?.session?.timeline_name ?? null
+    const expectedTimelineName = pendingTranscriptRecovery.timelineName ?? null
+    const backupMatchesRecoveryTimeline =
+      expectedTimelineName === null
+        ? backupTimelineName === null
+        : backupTimelineName === expectedTimelineName
+    const backupMatchesCurrentTimeline =
+      !currentTimelineName || !backupTimelineName || backupTimelineName === currentTimelineName
+
     let restored = false
-    if (words.length === 0 && storedBackup) {
+    if (words.length === 0 && storedBackup && backupMatchesRecoveryTimeline && backupMatchesCurrentTimeline) {
       const backup = restoreTranscriptBackup()
       if (backup) {
         restored = true
@@ -511,6 +566,7 @@ export function TranscriptEditor() {
     toast.error(message)
     setPendingTranscriptRecovery(null)
   }, [
+    currentTimelineName,
     pendingTranscriptRecovery,
     restoreTranscriptBackup,
     setPendingTranscriptRecovery,
@@ -625,10 +681,12 @@ export function TranscriptEditor() {
     }
 
     const attachedAudioDetections = audioOnlyDetections.filter(
-      (detection: any) => detection?.attachment === 'word_onset'
+      (detection: any) =>
+        detection?.attachment === 'word_onset' || detection?.attachment === 'word_offset'
     )
     const standaloneAudioDetections = audioOnlyDetections.filter(
-      (detection: any) => detection?.attachment !== 'word_onset'
+      (detection: any) =>
+        detection?.attachment !== 'word_onset' && detection?.attachment !== 'word_offset'
     )
 
     const attachedFillerMarkers = attachedAudioDetections.reduce<TranscriptWord[]>(
@@ -656,30 +714,70 @@ export function TranscriptEditor() {
           ) ?? (overlappingIndices.length === 1 ? overlappingIndices[0] : -1)
 
         if (attachedWordIndex < 0) {
+          markers.push(
+            normalizeWord({
+              word:
+                typeof detection.word === 'string' && detection.word.trim().length > 0
+                  ? detection.word
+                  : '[filler]',
+              kind: 'audio_hesitation',
+              start: detection.start,
+              end: detection.end,
+              start_frame: detection.start_frame,
+              end_frame: detection.end_frame,
+              source_start_frame: detection.source_start_frame,
+              source_end_frame: detection.source_end_frame,
+              probability: detection.probability ?? 1,
+              action: markForCut ? 'cut' : 'keep',
+              selected: false,
+            })
+          )
           return markers
         }
 
         const attachedWord = nextWords[attachedWordIndex]
-        const nextStart = Number(segment.end.toFixed(4))
         const minRemainingSeconds = Math.max(1 / Math.max(fps, 1), 0.02)
-        if (
-          !Number.isFinite(nextStart)
-          || nextStart <= attachedWord.start
-          || nextStart >= attachedWord.end - minRemainingSeconds
-        ) {
-          return markers
-        }
-
-        const updatedWord = { ...attachedWord, start: nextStart, boundary_refined: true }
-        if (typeof detection.end_frame === 'number') {
-          updatedWord.start_frame = detection.end_frame
-        } else if (typeof attachedWord.start_frame === 'number') {
-          updatedWord.start_frame = attachedWord.start_frame + Math.round((nextStart - attachedWord.start) * fps)
-        }
-        if (typeof detection.source_end_frame === 'number') {
-          updatedWord.source_start_frame = detection.source_end_frame
-        } else if (typeof attachedWord.source_start_frame === 'number') {
-          updatedWord.source_start_frame = attachedWord.source_start_frame + Math.round((nextStart - attachedWord.start) * fps)
+        const updatedWord = { ...attachedWord, boundary_refined: true }
+        if (detection?.attachment === 'word_offset') {
+          const nextEnd = Number(segment.start.toFixed(4))
+          if (
+            !Number.isFinite(nextEnd)
+            || nextEnd <= attachedWord.start + minRemainingSeconds
+            || nextEnd >= attachedWord.end
+          ) {
+            return markers
+          }
+          updatedWord.end = nextEnd
+          if (typeof detection.start_frame === 'number') {
+            updatedWord.end_frame = detection.start_frame
+          } else if (typeof attachedWord.end_frame === 'number') {
+            updatedWord.end_frame = attachedWord.end_frame - Math.round((attachedWord.end - nextEnd) * fps)
+          }
+          if (typeof detection.source_start_frame === 'number') {
+            updatedWord.source_end_frame = detection.source_start_frame
+          } else if (typeof attachedWord.source_end_frame === 'number') {
+            updatedWord.source_end_frame = attachedWord.source_end_frame - Math.round((attachedWord.end - nextEnd) * fps)
+          }
+        } else {
+          const nextStart = Number(segment.end.toFixed(4))
+          if (
+            !Number.isFinite(nextStart)
+            || nextStart <= attachedWord.start
+            || nextStart >= attachedWord.end - minRemainingSeconds
+          ) {
+            return markers
+          }
+          updatedWord.start = nextStart
+          if (typeof detection.end_frame === 'number') {
+            updatedWord.start_frame = detection.end_frame
+          } else if (typeof attachedWord.start_frame === 'number') {
+            updatedWord.start_frame = attachedWord.start_frame + Math.round((nextStart - attachedWord.start) * fps)
+          }
+          if (typeof detection.source_end_frame === 'number') {
+            updatedWord.source_start_frame = detection.source_end_frame
+          } else if (typeof attachedWord.source_start_frame === 'number') {
+            updatedWord.source_start_frame = attachedWord.source_start_frame + Math.round((nextStart - attachedWord.start) * fps)
+          }
         }
         nextWords[attachedWordIndex] = updatedWord
 
@@ -756,13 +854,18 @@ export function TranscriptEditor() {
       const data = teOp.result
       if (Array.isArray(data.words) && data.words.length > 0) {
         const normalized = data.words.map((word: any) => normalizeWord(word))
+        const nextLanguage =
+          typeof data.language === 'string' && data.language.trim().length > 0
+            ? data.language
+            : language
         const hasInitialFillerDetections = autoDetectFillers && Array.isArray(data.filler_detections)
         const annotated = hasInitialFillerDetections
           ? applyBackendFillerDetections(normalized, data.filler_detections || [], false)
           : null
-        skipNextAutoFillerAnalyzeRef.current = hasInitialFillerDetections
         pendingAutoDetectRef.current = true
+        pendingAutoAnalyzeTranscriptWordsRef.current = normalized
         setWords(annotated ? annotated.words : normalized)
+        setLanguage(nextLanguage)
         setSpeakerSummaries(Array.isArray(data.speakers) ? data.speakers : [])
         setDetectedFillerRanges(annotated ? annotated.ranges : [])
         storeRepetitionGroups([])
@@ -781,7 +884,7 @@ export function TranscriptEditor() {
     if (teOp?.status === 'error' && teOp.error) {
       setResult({ error: teOp.error })
     }
-  }, [teOp?.status, teOp?.result, teOp?.error, autoDetectFillers, applyBackendFillerDetections, handleEmptyTranscriptResult, storeRepetitionGroups])
+  }, [teOp?.status, teOp?.result, teOp?.error, autoDetectFillers, applyBackendFillerDetections, handleEmptyTranscriptResult, language, storeRepetitionGroups])
 
   useEffect(() => {
     const handleWindowMouseUp = () => {
@@ -1026,6 +1129,7 @@ export function TranscriptEditor() {
         setDetectedFillerRanges([])
         setSpeakerSummaries([])
         storeRepetitionGroups([])
+        setQuickAnalyzeSummary(null)
         staleNotifiedRef.current = false
         toast.success('Timeline changed — transcript synced automatically')
         return
@@ -1132,8 +1236,7 @@ export function TranscriptEditor() {
     if (!pendingAutoDetectRef.current || words.length === 0) return
     pendingAutoDetectRef.current = false
     if (hasPendingResolveChange) return
-    setPendingAutoAnalyzeFillers(autoDetectFillers && !skipNextAutoFillerAnalyzeRef.current)
-    skipNextAutoFillerAnalyzeRef.current = false
+    setPendingAutoAnalyzeFillers(autoDetectFillers)
     void handleFindSilences({
       showTimelineSwitchToast: false,
       insertMarkers: false,
@@ -1149,7 +1252,9 @@ export function TranscriptEditor() {
       markForCut: false,
       showToasts: false,
       enforceFreshTranscript: false,
+      transcriptWordsOverride: pendingAutoAnalyzeTranscriptWordsRef.current || undefined,
     })
+    pendingAutoAnalyzeTranscriptWordsRef.current = null
   }, [pendingAutoAnalyzeFillers, findingSilences, words, hasPendingResolveChange]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fast poll: drift-correct interpolation base from Resolve's playhead (no play-state logic)
@@ -1424,10 +1529,12 @@ export function TranscriptEditor() {
       language: language || null,
       range: range ?? null,
     })
+    pendingAutoAnalyzeTranscriptWordsRef.current = null
     useOperationStore.getState().startOperation(TE_OP_NAME)
     setResult(null)
     setSpeakerSummaries([])
     setDetectedFillerRanges([])
+    setQuickAnalyzeSummary(null)
     storeSilenceSegments([])
     storeRepetitionGroups([])
 
@@ -1456,6 +1563,10 @@ export function TranscriptEditor() {
         const ctx = data.transcript_context || null
         const nextSession = data.transcript_session || null
         const nextSpeakers = Array.isArray(data.speakers) ? data.speakers : []
+        const nextLanguage =
+          typeof data.language === 'string' && data.language.trim().length > 0
+            ? data.language
+            : language
         const hasInitialFillerDetections = autoDetectFillers && Array.isArray(data.filler_detections)
         const annotated = hasInitialFillerDetections
           ? applyBackendFillerDetections(normalized, data.filler_detections || [], false)
@@ -1463,21 +1574,24 @@ export function TranscriptEditor() {
 
         // Write to Zustand stores directly (works even if unmounted)
         useFeatureDataStore.getState().setTranscriptWords(normalized)
+        useFeatureDataStore.getState().setTranscriptLanguage(nextLanguage)
         useFeatureDataStore.getState().setTranscriptContext(ctx)
         useFeatureDataStore.getState().setTranscriptSession(nextSession)
         useFeatureDataStore.getState().setTranscriptSpeakers(nextSpeakers)
         saveTranscriptBackup({
           words: annotated ? annotated.words : normalized,
-          language,
+          language: nextLanguage,
           transcriptContext: ctx,
           transcriptSession: nextSession,
           speakerSummaries: nextSpeakers,
           waveform,
         })
+        setLanguage(nextLanguage)
         setTranscriptSession(nextSession)
         staleNotifiedRef.current = false
         useOperationStore.getState().completeOperation(TE_OP_NAME, {
           words: data.words,
+          language: nextLanguage,
           transcript_context: ctx,
           transcript_session: nextSession,
           speakers: nextSpeakers,
@@ -1485,8 +1599,8 @@ export function TranscriptEditor() {
         })
 
         // Update local state for the UI
-        skipNextAutoFillerAnalyzeRef.current = hasInitialFillerDetections
         pendingAutoDetectRef.current = true
+        pendingAutoAnalyzeTranscriptWordsRef.current = normalized
         setWords(annotated ? annotated.words : normalized)
         setDetectedFillerRanges(annotated ? annotated.ranges : [])
         setTranscriptContext(ctx)
@@ -1651,19 +1765,23 @@ export function TranscriptEditor() {
     }
   }
 
-  const handleAnalyzeSpeakers = async () => {
-    if (words.length === 0) return
+  const handleAnalyzeSpeakers = async ({ showToasts = true }: { showToasts?: boolean } = {}) => {
+    if (words.length === 0) {
+      return { speakerCount: 0 }
+    }
     if (!requirePinnedTimelineInteraction('running speaker analysis on the current Resolve timeline')) {
-      return
+      return null
     }
     if (!requireFreshTranscript('This transcript is out of date. Re-transcribe or sync it before running speaker analysis.')) {
-      return
+      return null
     }
 
     const spokenWords = words.filter((word) => !isAnalysisMarker(word))
     if (spokenWords.length === 0) {
-      toast.info('No spoken words available for speaker analysis')
-      return
+      if (showToasts) {
+        toast.info('No spoken words available for speaker analysis')
+      }
+      return { speakerCount: 0 }
     }
 
     useOperationStore.getState().startOperation('diarization')
@@ -1690,7 +1808,7 @@ export function TranscriptEditor() {
       if (data?.error) {
         useOperationStore.getState().failOperation('diarization', data.error)
         toast.error(data.error)
-        return
+        return { speakerCount: 0 }
       }
 
       let spokenIndex = 0
@@ -1719,19 +1837,29 @@ export function TranscriptEditor() {
       setShowSpeakers(true)
       setShowScriptPanel(false)
       useOperationStore.getState().completeOperation('diarization', data)
-      if (data.method === 'local_fallback') {
+      const speakerCount =
+        typeof data.speaker_count === 'number'
+          ? data.speaker_count
+          : Array.isArray(data.speakers)
+            ? data.speakers.length
+            : 0
+      if (showToasts && data.method === 'local_fallback') {
         toast.info('Using local speaker separation fallback. No Hugging Face login is required.')
       }
-      toast.success(
-        data.speaker_count > 1
-          ? `Detected ${data.speaker_count} speakers`
-          : data.speaker_count === 1
-            ? 'Detected 1 speaker'
-            : 'No clear speakers detected'
-      )
+      if (showToasts) {
+        toast.success(
+          speakerCount > 1
+            ? `Detected ${speakerCount} speakers`
+            : speakerCount === 1
+              ? 'Detected 1 speaker'
+              : 'No clear speakers detected'
+        )
+      }
+      return { speakerCount }
     } catch (err: any) {
       useOperationStore.getState().failOperation('diarization', err.message)
       toast.error(err.message)
+      return { speakerCount: 0 }
     } finally {
       setAnalyzingSpeakers(false)
     }
@@ -1865,7 +1993,7 @@ export function TranscriptEditor() {
 
     setShowClearTranscriptConfirm(false)
     pendingAutoDetectRef.current = false
-    skipNextAutoFillerAnalyzeRef.current = false
+    pendingAutoAnalyzeTranscriptWordsRef.current = null
     setPendingAutoAnalyzeFillers(false)
     staleNotifiedRef.current = false
     useOperationStore.getState().clearResult(TE_OP_NAME)
@@ -1877,6 +2005,7 @@ export function TranscriptEditor() {
     setSpeakerSummaries([])
     setWaveform(null)
     setDetectedFillerRanges([])
+    setQuickAnalyzeSummary(null)
     setShowSilenceSettings(false)
     setShowScriptPanel(false)
     setShowSpeakers(false)
@@ -1909,27 +2038,32 @@ export function TranscriptEditor() {
     markForCut,
     showToasts,
     enforceFreshTranscript,
+    transcriptWordsOverride,
   }: {
     markForCut: boolean
     showToasts: boolean
     enforceFreshTranscript: boolean
+    transcriptWordsOverride?: TranscriptWord[]
   }) => {
-    if (words.length === 0) return
+    if (words.length === 0) {
+      return { fillerCount: 0 }
+    }
     if (!requirePinnedTimelineInteraction('running filler detection on the current Resolve timeline', showToasts)) {
-      return
+      return null
     }
     if (
       enforceFreshTranscript &&
       !requireFreshTranscript('This transcript is out of date. Re-transcribe or sync it before finding fillers.')
     ) {
-      return
+      return null
     }
     setFindingFillers(true)
 
     try {
       const baseWords = words.filter((word) => !isAudioFillerMarker(word))
+      const analysisWords = transcriptWordsOverride ?? baseWords
       const transcriptPayload = {
-        words: baseWords
+        words: analysisWords
           .filter((word) => !isAnalysisMarker(word))
           .map((word) => ({
             word: word.word,
@@ -1969,6 +2103,7 @@ export function TranscriptEditor() {
             : `Detected ${totalMarked} filler candidate${totalMarked !== 1 ? 's' : ''}`
         )
       }
+      return { fillerCount: totalMarked }
     } catch (err: any) {
       console.warn('Backend filler analysis failed, falling back to local transcript heuristic', err)
       let markedCount = 0
@@ -2009,7 +2144,7 @@ export function TranscriptEditor() {
       setDetectedFillerRanges(localRanges)
 
       if (!showToasts) {
-        return
+        return { fillerCount: markForCut ? markedCount : localRanges.length }
       }
 
       const backendMessage =
@@ -2032,6 +2167,7 @@ export function TranscriptEditor() {
         const sourceMsg = markForCut ? ' using transcript-text fallback' : ' from transcript text only'
         toast.success(`Marked ${markedCount} filler word${markedCount !== 1 ? 's' : ''} for cutting${skipMsg}${sourceMsg}.${backendMessage}`)
       }
+      return { fillerCount: markForCut ? markedCount : localRanges.length }
     } finally {
       setFindingFillers(false)
     }
@@ -2094,20 +2230,24 @@ export function TranscriptEditor() {
     }
   }
 
-  const handleMarkRepetitions = async () => {
-    if (words.length === 0) return
+  const handleMarkRepetitions = async ({ showToasts = true }: { showToasts?: boolean } = {}) => {
+    if (words.length === 0) {
+      return { groups: 0, takesMarked: 0 }
+    }
     if (!requirePinnedTimelineInteraction('running retake detection on the current Resolve timeline')) {
-      return
+      return null
     }
     if (!requireFreshTranscript('This transcript is out of date. Re-transcribe or sync it before finding retakes.')) {
-      return
+      return null
     }
 
     const spokenWords = words.filter((word) => !isAnalysisMarker(word))
     if (spokenWords.length < 6) {
       storeRepetitionGroups([])
-      toast.info('Not enough transcript to detect retakes')
-      return
+      if (showToasts) {
+        toast.info('Not enough transcript to detect retakes')
+      }
+      return { groups: 0, takesMarked: 0 }
     }
 
     setFindingRepetitions(true)
@@ -2139,8 +2279,10 @@ export function TranscriptEditor() {
       storeRepetitionGroups(groups)
 
       if (groups.length === 0) {
-        toast.info('No retakes detected')
-        return
+        if (showToasts) {
+          toast.info('No retakes detected')
+        }
+        return { groups: 0, takesMarked: 0 }
       }
 
       const applied = applyRepetitionCuts(spokenWords, groups)
@@ -2149,15 +2291,21 @@ export function TranscriptEditor() {
       }
 
       if (applied.takes === 0) {
-        toast.info(`Detected ${groups.length} retake section${groups.length !== 1 ? 's' : ''}, but the losing takes were already marked for cutting`)
-        return
+        if (showToasts) {
+          toast.info(`Detected ${groups.length} retake section${groups.length !== 1 ? 's' : ''}, but the losing takes were already marked for cutting`)
+        }
+        return { groups: groups.length, takesMarked: 0 }
       }
 
-      toast.success(
-        `Marked ${applied.takes} losing take${applied.takes !== 1 ? 's' : ''} across ${applied.groups} retake section${applied.groups !== 1 ? 's' : ''} for cutting`
-      )
+      if (showToasts) {
+        toast.success(
+          `Marked ${applied.takes} losing take${applied.takes !== 1 ? 's' : ''} across ${applied.groups} retake section${applied.groups !== 1 ? 's' : ''} for cutting`
+        )
+      }
+      return { groups: applied.groups, takesMarked: applied.takes }
     } catch (err: any) {
       toast.error(err?.message || 'Failed to detect retakes')
+      return { groups: 0, takesMarked: 0 }
     } finally {
       setFindingRepetitions(false)
     }
@@ -2170,17 +2318,19 @@ export function TranscriptEditor() {
       showToasts?: boolean
     } = {}
   ) => {
-    if (words.length < 2) return
+    if (words.length < 2) {
+      return { silenceCount: 0, silenceSeconds: 0 }
+    }
     if (
       !requirePinnedTimelineInteraction(
         'running silence detection on the current Resolve timeline',
         options.showTimelineSwitchToast ?? true,
       )
     ) {
-      return
+      return null
     }
     if (!requireFreshTranscript('This transcript is out of date. Re-transcribe or sync it before finding silences.')) {
-      return
+      return null
     }
     setFindingSilences(true)
     const insertMarkers = options.insertMarkers ?? true
@@ -2324,7 +2474,7 @@ export function TranscriptEditor() {
       }
 
       if (!showToasts) {
-        return
+        return { silenceCount, silenceSeconds: silenceTotal }
       }
       if (silenceCount === 0) {
         toast.info(`No silences found at ${silenceThreshold}dB / ${Math.round(minGap * 1000)}ms minimum`)
@@ -2335,6 +2485,7 @@ export function TranscriptEditor() {
             : `Detected ${silenceCount} silence${silenceCount !== 1 ? 's' : ''} in the background`
         )
       }
+      return { silenceCount, silenceSeconds: silenceTotal }
     } catch {
       // Backend unavailable — fall back to gap-only detection
       const newWords: TranscriptWord[] = []
@@ -2422,7 +2573,7 @@ export function TranscriptEditor() {
       }
 
       if (!showToasts) {
-        return
+        return { silenceCount, silenceSeconds: silenceTotal }
       }
       if (silenceCount === 0) {
         toast.info(`No silences longer than ${silenceMinDuration}ms found`)
@@ -2433,8 +2584,72 @@ export function TranscriptEditor() {
             : `Detected ${silenceCount} silence${silenceCount !== 1 ? 's' : ''} in the background`
         )
       }
+      return { silenceCount, silenceSeconds: silenceTotal }
     } finally {
       setFindingSilences(false)
+    }
+  }
+
+  const handleQuickAnalyze = async () => {
+    if (quickAnalyzeRunning || words.length === 0) return
+    if (!requirePinnedTimelineInteraction('running Quick Analyze on the current Resolve timeline')) {
+      return
+    }
+    if (!requireFreshTranscript('This transcript is out of date. Re-transcribe or sync it before running Quick Analyze.')) {
+      return
+    }
+
+    setQuickAnalyzeSummary(null)
+
+    try {
+      setQuickAnalyzeStep('silences')
+      const silenceResult = await handleFindSilences({
+        showTimelineSwitchToast: false,
+        insertMarkers: true,
+        showToasts: false,
+      })
+
+      setQuickAnalyzeStep('fillers')
+      const fillerResult = await analyzeFillers({
+        markForCut: true,
+        showToasts: false,
+        enforceFreshTranscript: false,
+      })
+
+      setQuickAnalyzeStep('retakes')
+      const repetitionResult = await handleMarkRepetitions({ showToasts: false })
+
+      setQuickAnalyzeStep('speakers')
+      const speakerResult = await handleAnalyzeSpeakers({ showToasts: false })
+
+      const summary: QuickAnalyzeSummary = {
+        silenceCount: silenceResult?.silenceCount ?? 0,
+        silenceSeconds: silenceResult?.silenceSeconds ?? 0,
+        fillerCount: fillerResult?.fillerCount ?? 0,
+        retakeGroups: repetitionResult?.groups ?? 0,
+        retakeTakes: repetitionResult?.takesMarked ?? 0,
+        speakerCount: speakerResult?.speakerCount ?? 0,
+        completedAt: Date.now(),
+      }
+
+      if (summary.silenceCount > 0) {
+        setShowSilenceSettings(true)
+      }
+
+      setQuickAnalyzeSummary(summary)
+
+      const summaryParts = [
+        `${summary.silenceCount} silence${summary.silenceCount !== 1 ? 's' : ''}`,
+        `${summary.fillerCount} filler${summary.fillerCount !== 1 ? 's' : ''}`,
+        `${summary.retakeTakes} losing take${summary.retakeTakes !== 1 ? 's' : ''}`,
+      ]
+      if (summary.speakerCount > 0) {
+        summaryParts.push(`${summary.speakerCount} speaker${summary.speakerCount !== 1 ? 's' : ''}`)
+      }
+
+      toast.success(`Quick Analyze complete: ${summaryParts.join(', ')}`)
+    } finally {
+      setQuickAnalyzeStep('idle')
     }
   }
 
@@ -2498,6 +2713,7 @@ export function TranscriptEditor() {
         setDetectedFillerRanges([])
         setSpeakerSummaries([])
         storeRepetitionGroups([])
+        setQuickAnalyzeSummary(null)
         staleNotifiedRef.current = false
         toast.success(data.message || 'Transcript synced to the current timeline. Re-run fillers, silences, and speakers if needed.')
         return
@@ -2539,11 +2755,13 @@ export function TranscriptEditor() {
       const fps = parseFloat(framerate) || 24
       const rawFillerCutSegments = mergeWordSegments(
         words,
-        (word) => word.action === 'cut' && !isSilenceMarker(word) && isWordFiller(word)
+        (word) => word.action === 'cut' && !isSilenceMarker(word) && isWordFiller(word),
+        { kind: 'filler' }
       )
       const rawSpeechCutSegments = mergeWordSegments(
         words,
-        (word) => word.action === 'cut' && !isSilenceMarker(word) && !isWordFiller(word)
+        (word) => word.action === 'cut' && !isSilenceMarker(word) && !isWordFiller(word),
+        { kind: 'speech' }
       )
       const rawSilenceCutSegments = mergeWordSegments(
         words,
@@ -2551,14 +2769,8 @@ export function TranscriptEditor() {
       )
       const mutedSegments = mergeWordSegments(words, (word) => word.action === 'mute')
 
-      const fillerCutSegments = rawFillerCutSegments
-        .map((seg) => adjustFillerSegmentForRemoval(seg, fps))
-        .filter((seg): seg is Segment => Boolean(seg))
-      const speechCutSegments = rawSpeechCutSegments
-        .map((seg) => shrinkSegmentForSafety(seg, fps))
-        .filter((seg): seg is Segment => Boolean(seg))
       const silenceCutSegments = rawSilenceCutSegments.filter((seg) => seg.end - seg.start > 0.02)
-      const cutSegments = [...fillerCutSegments, ...speechCutSegments, ...silenceCutSegments].sort((a, b) => a.start - b.start)
+      const cutSegments = [...rawFillerCutSegments, ...rawSpeechCutSegments, ...silenceCutSegments].sort((a, b) => a.start - b.start)
 
       const data = await apiFetch('/api/transcript-editor/apply', {
         method: 'POST',
@@ -2578,10 +2790,12 @@ export function TranscriptEditor() {
         const nextContext = data.updated_transcript_context || transcriptContext
         const nextTimelineStartFrame =
           typeof nextContext?.clip_start_frame === 'number' ? nextContext.clip_start_frame : undefined
-        setWords((prev) => retimeWordsAfterCuts(prev, cutSegments, fps, nextTimelineStartFrame))
+        const appliedCutSegments = normalizeAppliedCutSegments((data.applied_cut_segments || cutSegments) as any[])
+        setWords((prev) => retimeWordsAfterCuts(prev, appliedCutSegments, fps, nextTimelineStartFrame))
         setSpeakerSummaries([])
         setDetectedFillerRanges([])
         storeRepetitionGroups([])
+        setQuickAnalyzeSummary(null)
         if (nextContext) {
           setTranscriptContext(nextContext)
         }
@@ -2674,7 +2888,7 @@ export function TranscriptEditor() {
       ...w,
       action: kept[idx] ? ('keep' as WordAction) : ('cut' as WordAction),
     }))
-    const cutSegments = mergeWordSegments(scriptWords, (w) => w.action === 'cut')
+    const cutSegments = mergeWordSegments(scriptWords, (w) => w.action === 'cut', { kind: 'script' })
     const cutWordsList = scriptableWords.filter((_, idx) => !kept[idx])
     const cutSeconds = cutWordsList.reduce((sum, w) => sum + (w.end - w.start), 0)
 
@@ -2702,9 +2916,11 @@ export function TranscriptEditor() {
         const nextContext = data.updated_transcript_context || transcriptContext
         const nextTimelineStartFrame =
           typeof nextContext?.clip_start_frame === 'number' ? nextContext.clip_start_frame : undefined
-        setWords(retimeWordsAfterCuts(scriptWords, cutSegments, fps, nextTimelineStartFrame))
+        const appliedCutSegments = normalizeAppliedCutSegments((data.applied_cut_segments || cutSegments) as any[])
+        setWords(retimeWordsAfterCuts(scriptWords, appliedCutSegments, fps, nextTimelineStartFrame))
         setSpeakerSummaries([])
         setDetectedFillerRanges([])
+        setQuickAnalyzeSummary(null)
         if (nextContext) {
           setTranscriptContext(nextContext)
         }
@@ -2814,6 +3030,22 @@ export function TranscriptEditor() {
     Math.round((silenceMinFrames / fpsValue) * 1000)
   )
   const primarySpeaker = speakerSummaries.find((speaker) => speaker.is_primary_suggestion)
+  const quickAnalyzeStepLabel =
+    quickAnalyzeStep === 'silences'
+      ? 'Finding silences'
+      : quickAnalyzeStep === 'fillers'
+        ? 'Marking filler words'
+        : quickAnalyzeStep === 'retakes'
+          ? 'Finding retakes'
+          : quickAnalyzeStep === 'speakers'
+            ? 'Separating speakers'
+            : 'Quick Analyze'
+  const quickAnalyzeCompletedLabel = quickAnalyzeSummary
+    ? new Date(quickAnalyzeSummary.completedAt).toLocaleTimeString([], {
+        hour: 'numeric',
+        minute: '2-digit',
+      })
+    : null
 
 
 
@@ -2934,6 +3166,9 @@ export function TranscriptEditor() {
             hasDetectedFillers={hasDetectedFillers}
             onMarkRepetitions={() => void handleMarkRepetitions()}
             findingRepetitions={findingRepetitions}
+            onQuickAnalyze={() => void handleQuickAnalyze()}
+            quickAnalyzeRunning={quickAnalyzeRunning}
+            quickAnalyzeLabel={quickAnalyzeStepLabel}
             autoDetectFillers={autoDetectFillers}
             onToggleAutoDetect={() => setAutoDetectFillers(f => !f)}
             fillerCount={fillerCount}
@@ -2963,6 +3198,42 @@ export function TranscriptEditor() {
             onExport={handleExportTranscript}
             transcriptMutationBlocked={transcriptMutationBlocked}
           />
+
+          {(quickAnalyzeRunning || quickAnalyzeSummary) && (
+            <Card className="border-resolve-accent/20 bg-resolve-accent/5">
+              <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-resolve-text">Quick Analyze</div>
+                  {quickAnalyzeRunning ? (
+                    <div className="mt-1 text-xs text-resolve-textMuted">
+                      {quickAnalyzeStepLabel}. FinlayCut is running the default cleanup pass on this transcript.
+                    </div>
+                  ) : quickAnalyzeSummary ? (
+                    <div className="mt-1 text-xs text-resolve-textMuted">
+                      Last run at {quickAnalyzeCompletedLabel}. Review the marked transcript edits, then apply them to Resolve when you are satisfied.
+                    </div>
+                  ) : null}
+                </div>
+                {quickAnalyzeSummary && !quickAnalyzeRunning && (
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className="rounded-full border border-resolve-border bg-resolve-bg px-2 py-1 text-resolve-textMuted">
+                      {quickAnalyzeSummary.silenceCount} silence{quickAnalyzeSummary.silenceCount !== 1 ? 's' : ''}
+                      {quickAnalyzeSummary.silenceSeconds > 0 ? ` (${quickAnalyzeSummary.silenceSeconds.toFixed(1)}s)` : ''}
+                    </span>
+                    <span className="rounded-full border border-resolve-border bg-resolve-bg px-2 py-1 text-resolve-textMuted">
+                      {quickAnalyzeSummary.fillerCount} filler{quickAnalyzeSummary.fillerCount !== 1 ? 's' : ''}
+                    </span>
+                    <span className="rounded-full border border-resolve-border bg-resolve-bg px-2 py-1 text-resolve-textMuted">
+                      {quickAnalyzeSummary.retakeTakes} losing take{quickAnalyzeSummary.retakeTakes !== 1 ? 's' : ''} across {quickAnalyzeSummary.retakeGroups} retake section{quickAnalyzeSummary.retakeGroups !== 1 ? 's' : ''}
+                    </span>
+                    <span className="rounded-full border border-resolve-border bg-resolve-bg px-2 py-1 text-resolve-textMuted">
+                      {quickAnalyzeSummary.speakerCount} speaker{quickAnalyzeSummary.speakerCount !== 1 ? 's' : ''}
+                    </span>
+                  </div>
+                )}
+              </div>
+            </Card>
+          )}
 
           {showSilenceSettings && (
             <SilenceSettingsPanel

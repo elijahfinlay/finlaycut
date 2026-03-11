@@ -33,6 +33,27 @@ class WebSocketManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(fast, manager.active_connections)
         self.assertNotIn(slow, manager.active_connections)
 
+    async def test_timeline_watch_notifications_are_tracked_per_connection(self):
+        manager = ConnectionManager()
+        watcher_a = _FastWebSocket()
+        watcher_b = _FastWebSocket()
+        manager.active_connections = {watcher_a, watcher_b}
+
+        manager.set_signature_watch(watcher_a, "sig-a", "Timeline A")
+        manager.set_signature_watch(watcher_b, "sig-b", "Timeline B")
+
+        await manager.notify_timeline_watchers("sig-b", "Timeline B")
+
+        self.assertEqual(
+            watcher_a.messages,
+            [{
+                "type": "timeline_changed",
+                "timeline_signature": "sig-b",
+                "timeline_name": "Timeline B",
+            }],
+        )
+        self.assertEqual(watcher_b.messages, [])
+
 
 if __name__ == "__main__":
     unittest.main()

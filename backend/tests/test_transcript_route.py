@@ -83,8 +83,10 @@ class TranscriptRouteTests(unittest.TestCase):
         self.assertEqual(payload["words"][0]["word"], "hello")
         self.assertEqual(payload["words"][0]["start_frame"], 100)
         self.assertEqual(payload["transcript_session"]["timeline_signature"], "sig-123")
+        self.assertEqual(payload["analysis_audio_source"], "rendered_master_mix")
+        self.assertIsNone(payload["analysis_audio_fallback_reason"])
         render_audio.assert_called_once_with(
-            "finlaycut_transcript",
+            name_prefix="finlaycut_transcript",
             mark_in_frame=None,
             mark_out_frame=None,
             fallback_restore_page="edit",
@@ -149,8 +151,8 @@ class TranscriptRouteTests(unittest.TestCase):
     def test_transcribe_returns_initial_filler_detections_with_timeline_offsets(self):
         fake_transcript = {
             "words": [
-                {"word": "hello", "start": 0.0, "end": 0.5, "probability": 0.98},
-                {"word": "world", "start": 0.8, "end": 1.1, "probability": 0.98},
+                {"word": "hello", "start": 5.0, "end": 5.5, "probability": 0.98},
+                {"word": "world", "start": 5.8, "end": 6.1, "probability": 0.98},
             ],
             "language": "en",
         }
@@ -171,8 +173,8 @@ class TranscriptRouteTests(unittest.TestCase):
         filler_detection = {
             "word": "[filler]",
             "kind": "audio_hesitation",
-            "start": 0.2,
-            "end": 0.3,
+            "start": 5.2,
+            "end": 5.3,
             "selected": True,
         }
 
@@ -199,8 +201,18 @@ class TranscriptRouteTests(unittest.TestCase):
                     "timeline_signature": "sig-123",
                 },
             ),
-            patch.object(transcript_editor, "extract_audio", return_value="/tmp/full.wav"),
-            patch.object(transcript_editor, "extract_audio_segment", return_value="/tmp/clip.wav"),
+            patch.object(
+                transcript_editor,
+                "prepare_timeline_analysis_audio",
+                return_value={
+                    "audio_path": "/tmp/rendered-master-mix.wav",
+                    "fps": 24.0,
+                    "timeline_start_frame": 100,
+                    "timeline_end_frame": 220,
+                    "analysis_audio_source": "rendered_master_mix",
+                    "analysis_audio_fallback_reason": None,
+                },
+            ),
             patch.object(
                 transcript_editor.audio_service,
                 "transcribe_with_progress",
@@ -231,6 +243,7 @@ class TranscriptRouteTests(unittest.TestCase):
         self.assertEqual(detection["source_end_frame"], 1007)
         self.assertEqual(detection["clip_item_id"], "clip-1")
         self.assertEqual(detection["file_path"], "/tmp/source.mov")
+        self.assertEqual(payload["analysis_audio_source"], "rendered_master_mix")
         self.assertEqual(analyze_candidates.call_args.kwargs["filler_words"], ["um", "uh"])
 
     def test_transcribe_keeps_session_bound_to_starting_timeline(self):

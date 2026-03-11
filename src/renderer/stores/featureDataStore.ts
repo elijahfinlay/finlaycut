@@ -87,6 +87,69 @@ interface SilenceSegment {
   selected: boolean
 }
 
+interface ClipSearchMatchField {
+  field: string
+  text: string
+}
+
+interface ClipSearchResult {
+  clip_key: string
+  clip_item_id?: string | null
+  clip_name: string
+  track_index: number
+  timeline_start_frame: number
+  timeline_end_frame: number
+  timeline_start_seconds: number
+  timeline_end_seconds: number
+  summary_text: string
+  shot_type?: string | null
+  labels: string[]
+  ocr_text: string
+  transcript_text: string
+  error_state?: string | null
+  error_message?: string | null
+  match_fields: ClipSearchMatchField[]
+}
+
+interface ClipSearchScope {
+  mode: string
+  track_index: number
+  in_frame: number
+  out_frame: number
+  in_seconds: number
+  out_seconds: number
+}
+
+interface ClipSearchStatus {
+  analysis_key: string
+  current_scope: ClipSearchScope | null
+  analysis: any | null
+  transcript_available: boolean
+  vision_provider?: string
+  has_provider_key?: boolean
+}
+
+interface DuplicateClipInstance {
+  clip_name: string
+  track_index: number
+  timeline_item_unique_id?: string | null
+  timeline_start_frame: number
+  timeline_end_frame: number
+  timeline_start_seconds: number
+  timeline_end_seconds: number
+  source_start_frame: number
+  source_end_frame: number
+}
+
+interface DuplicateClipGroup {
+  source_key: string
+  source_label: string
+  source_start_frame: number
+  source_end_frame: number
+  instance_count: number
+  instances: DuplicateClipInstance[]
+}
+
 interface FeatureDataState {
   // Transcript Editor
   transcriptWords: TranscriptWord[]
@@ -144,10 +207,20 @@ interface FeatureDataState {
   // Repetition
   repetitionGroups: any[]
   setRepetitionGroups: (groups: any[]) => void
+  duplicateClipGroups: DuplicateClipGroup[]
+  setDuplicateClipGroups: (groups: DuplicateClipGroup[]) => void
 
   // Podcast
   podcastTracks: any[]
   setPodcastTracks: (tracks: any[]) => void
+
+  // Clip Search
+  clipSearchQuery: string
+  clipSearchResults: ClipSearchResult[]
+  clipSearchStatus: ClipSearchStatus | null
+  setClipSearchQuery: (query: string) => void
+  setClipSearchResults: (results: ClipSearchResult[]) => void
+  setClipSearchStatus: (status: ClipSearchStatus | null) => void
 
   // Clear all data (e.g. when timeline changes)
   clearNonTranscriptData: () => void
@@ -232,10 +305,20 @@ export const useFeatureDataStore = create<FeatureDataState>()(
       // Repetition
       repetitionGroups: [],
       setRepetitionGroups: (groups) => set({ repetitionGroups: groups }),
+      duplicateClipGroups: [],
+      setDuplicateClipGroups: (groups) => set({ duplicateClipGroups: groups }),
 
       // Podcast
       podcastTracks: [],
       setPodcastTracks: (tracks) => set({ podcastTracks: tracks }),
+
+      // Clip Search
+      clipSearchQuery: '',
+      clipSearchResults: [],
+      clipSearchStatus: null,
+      setClipSearchQuery: (query) => set({ clipSearchQuery: query }),
+      setClipSearchResults: (results) => set({ clipSearchResults: results }),
+      setClipSearchStatus: (status) => set({ clipSearchStatus: status }),
 
       clearNonTranscriptData: () => set({
         fillerDetections: [],
@@ -247,7 +330,11 @@ export const useFeatureDataStore = create<FeatureDataState>()(
         viralClips: [],
         brollSuggestions: [],
         repetitionGroups: [],
+        duplicateClipGroups: [],
         podcastTracks: [],
+        clipSearchQuery: '',
+        clipSearchResults: [],
+        clipSearchStatus: null,
       }),
 
       // Clear
@@ -268,7 +355,11 @@ export const useFeatureDataStore = create<FeatureDataState>()(
         viralClips: [],
         brollSuggestions: [],
         repetitionGroups: [],
+        duplicateClipGroups: [],
         podcastTracks: [],
+        clipSearchQuery: '',
+        clipSearchResults: [],
+        clipSearchStatus: null,
       }),
     }),
     {
@@ -292,7 +383,11 @@ export const useFeatureDataStore = create<FeatureDataState>()(
         viralClips: state.viralClips,
         brollSuggestions: state.brollSuggestions,
         repetitionGroups: state.repetitionGroups,
+        duplicateClipGroups: state.duplicateClipGroups,
         podcastTracks: state.podcastTracks,
+        clipSearchQuery: state.clipSearchQuery,
+        clipSearchResults: state.clipSearchResults,
+        clipSearchStatus: state.clipSearchStatus,
       }),
     }
   )

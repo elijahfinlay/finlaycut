@@ -65,11 +65,42 @@ async def get_timeline_signature():
     return {"success": True, **info}
 
 
+@router.get("/markers")
+async def get_timeline_markers():
+    """Get markers from the current timeline for debugging and validation."""
+    if not resolve_service.connected:
+        return {"success": False, "error": "Not connected to DaVinci Resolve", "markers": []}
+    markers = resolve_service.get_timeline_markers()
+    return {"success": True, "markers": markers}
+
+
 @router.get("/timelines")
 async def get_all_timelines():
     """Get list of all timelines in the current project."""
     timelines = resolve_service.get_all_timelines()
     return {"timelines": timelines}
+
+
+class TimelineSelectRequest(BaseModel):
+    timeline_index: int
+
+
+@router.post("/timeline/select")
+async def select_timeline(request: TimelineSelectRequest):
+    """Switch the active Resolve timeline."""
+    if not resolve_service.connected:
+        return {"success": False, "error": "Not connected to DaVinci Resolve"}
+
+    result = await asyncio.to_thread(
+        resolve_service.set_current_timeline_by_index,
+        request.timeline_index,
+    )
+    if not result.get("success"):
+        return result
+    return {
+        **result,
+        "status": resolve_service.get_status(),
+    }
 
 
 @router.get("/playhead")

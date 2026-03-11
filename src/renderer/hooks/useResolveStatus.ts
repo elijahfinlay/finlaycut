@@ -35,6 +35,11 @@ export function useResolveStatus(pollInterval = 2000) {
       setError(null)
       return data
     } catch (err: any) {
+      setStatus({
+        connected: false,
+        project: null,
+        timeline: null,
+      })
       setError('Backend not reachable')
       return null
     }

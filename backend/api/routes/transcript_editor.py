@@ -8,12 +8,16 @@ from typing import Literal, Optional
 from uuid import uuid4
 from services.resolve_service import resolve_service
 from services.audio_service import audio_service
+from services.cut_refiner_service import cut_refiner_service
 from services.diarization_service import diarization_service
+from services.clip_search_service import clip_search_service
 from utils.audio_utils import extract_audio, extract_audio_segment, assemble_timeline_audio
 from services.audio_state import set_last_transcription_audio
 from utils.operation_queue import heavy_operation
 from utils.speaker_analysis import build_speaker_summaries, compute_speaker_loudness
+from utils.timeline_audio import prepare_timeline_analysis_audio
 from api.websocket import manager
+from config import settings
 
 logger = logging.getLogger("finlaycut.transcript_editor")
 
@@ -37,6 +41,14 @@ class KeptSegment(BaseModel):
     source_end_frame: Optional[int] = None
     file_path: Optional[str] = None
     clip_item_id: Optional[str] = None
+    kind: Optional[str] = None
+    label: Optional[str] = None
+    boundary_source: Optional[str] = None
+    prev_word_end: Optional[float] = None
+    next_word_start: Optional[float] = None
+    prev_word_end_frame: Optional[int] = None
+    next_word_start_frame: Optional[int] = None
+    padding_ms: Optional[int] = None
 
 
 class TranscriptContext(BaseModel):
@@ -116,6 +128,40 @@ def _match_clip_segment_for_range(
             best_overlap = overlap
             best_match = seg
     return best_match
+
+
+def _build_clip_segments_from_contexts(
+    clip_contexts: list[dict],
+    *,
+    range_in: float | None = None,
+    range_out: float | None = None,
+) -> list[dict]:
+    segments: list[dict] = []
+    for clip_context in clip_contexts:
+        clip_start_frame = int(clip_context["clip_start_frame"])
+        clip_end_frame = int(clip_context["clip_end_frame"])
+        clip_timeline_start_sec = float(clip_context["clip_timeline_offset"])
+        clip_duration_sec = float(clip_context["clip_duration_seconds"])
+        clip_timeline_end_sec = clip_timeline_start_sec + clip_duration_sec
+
+        if range_in is not None and range_out is not None:
+            if clip_timeline_end_sec <= range_in or clip_timeline_start_sec >= range_out:
+                continue
+
+        segments.append({
+            "timeline_start_seconds": clip_timeline_start_sec,
+            "timeline_end_seconds": clip_timeline_end_sec,
+            "duration_seconds": clip_duration_sec,
+            "timeline_start_frame": clip_start_frame,
+            "timeline_end_frame": clip_end_frame,
+            "source_start_frame": int(clip_context["source_start_frame"]) if clip_context.get("source_start_frame") is not None else None,
+            "source_end_frame": int(clip_context["source_end_frame"]) if clip_context.get("source_end_frame") is not None else None,
+            "file_path": str(clip_context["file_path"]) if clip_context.get("file_path") is not None else None,
+            "clip_item_id": clip_context.get("clip_item_id"),
+            "source_start_seconds": clip_context.get("source_start_seconds"),
+            "source_end_seconds": clip_context.get("source_end_seconds"),
+        })
+    return segments
 
 
 def _annotate_filler_detections(
@@ -276,23 +322,14 @@ async def transcribe_timeline(request: TranscribeRequest):
     clip_contexts = clip_selection["contexts"]
     if not clip_selection["has_any_items"]:
         return {"error": "No clips found in timeline. Make sure your timeline has at least one clip."}
+    clip_segments = _build_clip_segments_from_contexts(
+        clip_contexts,
+        range_in=range_in if is_range else None,
+        range_out=range_out if is_range else None,
+    )
     rendered_timeline_audio = None
-    if not clip_contexts:
-        logger.warning("Transcript extraction found no usable clip sources: %s", clip_selection["attempts"])
-        render_mark_in = None
-        render_mark_out = None
-        if is_range:
-            render_mark_in = timeline_start_frame + int(round(float(range_in) * fps))
-            render_mark_out = timeline_start_frame + int(round(float(range_out) * fps)) - 1
-        rendered_timeline_audio = resolve_service.render_current_timeline_audio(
-            "finlaycut_transcript",
-            mark_in_frame=render_mark_in,
-            mark_out_frame=render_mark_out,
-            fallback_restore_page="edit",
-        )
-        if not rendered_timeline_audio:
-            return {"error": "Could not extract audio from any timeline clips."}
-        logger.info("Using rendered timeline audio fallback for transcript extraction")
+    analysis_audio_source: str | None = None
+    analysis_audio_fallback_reason: str | None = None
 
     logger.info(
         "Transcribing timeline%s: %d usable clips from %s track %s, %.1fs total duration",
@@ -304,97 +341,155 @@ async def transcribe_timeline(request: TranscribeRequest):
     )
 
     try:
-        clip_segments: list[dict] = []
         cached_audio_duration = timeline_duration_seconds
-        if rendered_timeline_audio:
-            await manager.send_progress("transcript_editor", 0.10, "Using rendered timeline audio...")
-            audio_path = rendered_timeline_audio
+        if bool(getattr(settings, "enable_master_mix_analysis_default", True)):
+            render_mark_in = None
+            render_mark_out = None
+            if is_range:
+                render_mark_in = timeline_start_frame + int(round(float(range_in) * fps))
+                render_mark_out = timeline_start_frame + int(round(float(range_out) * fps)) - 1
+            analysis_audio = prepare_timeline_analysis_audio(
+                name_prefix="finlaycut_transcript",
+                mark_in_frame=render_mark_in,
+                mark_out_frame=render_mark_out,
+                fallback_restore_page="edit",
+                allow_track_fallback=True,
+                reuse_cached_master_mix=False,
+            )
+            if not analysis_audio.get("audio_path"):
+                return {"error": "Could not prepare timeline audio for transcription."}
+
+            audio_path = str(analysis_audio["audio_path"])
+            analysis_audio_source = str(analysis_audio.get("analysis_audio_source") or "rendered_master_mix")
+            analysis_audio_fallback_reason = (
+                str(analysis_audio.get("analysis_audio_fallback_reason"))
+                if analysis_audio.get("analysis_audio_fallback_reason") is not None
+                else None
+            )
+            rendered_timeline_audio = audio_path if analysis_audio_source == "rendered_master_mix" else None
+
+            if analysis_audio_source in {"cached_master_mix", "rendered_master_mix"}:
+                await manager.send_progress("transcript_editor", 0.10, "Using rendered timeline mix...")
+            else:
+                await manager.send_progress("transcript_editor", 0.10, "Using best-track fallback audio...")
+
             audio_offset = 0.0
             cached_audio_duration = timeline_duration_seconds
+            if is_range:
+                if analysis_audio_source == "assembled_best_track":
+                    try:
+                        audio_path = extract_audio_segment(audio_path, range_in, range_out)
+                    except Exception as e:
+                        logger.warning("Range trim failed for assembled transcription audio (%s)", e)
+                    else:
+                        audio_offset = float(range_in)
+                        cached_audio_duration = max(0.0, float(range_out - range_in))
+                else:
+                    audio_offset = float(range_in)
+                    cached_audio_duration = max(0.0, float(range_out - range_in))
         else:
-            await manager.send_progress(
-                "transcript_editor",
-                0.02,
-                f"Extracting audio from {len(clip_contexts)} clip(s)...{range_label}",
-            )
-
-            # Extract audio for each clip's source range
-            audio_cache: dict[str, str] = {}  # source file -> extracted WAV path
-
-            for i, clip_context in enumerate(clip_contexts):
-                file_path = str(clip_context["file_path"])
-                clip_start_frame = int(clip_context["clip_start_frame"])
-                clip_end_frame = int(clip_context["clip_end_frame"])
-                clip_timeline_start_sec = float(clip_context["clip_timeline_offset"])
-                clip_duration_sec = float(clip_context["clip_duration_seconds"])
-                clip_timeline_end_sec = clip_timeline_start_sec + clip_duration_sec
-
-                # Skip clips entirely outside the in/out range
+            if not clip_contexts:
+                logger.warning("Transcript extraction found no usable clip sources: %s", clip_selection["attempts"])
+                render_mark_in = None
+                render_mark_out = None
                 if is_range:
-                    if clip_timeline_end_sec <= range_in or clip_timeline_start_sec >= range_out:
-                        continue
-
-                pct = 0.02 + (i / len(clip_contexts)) * 0.08
+                    render_mark_in = timeline_start_frame + int(round(float(range_in) * fps))
+                    render_mark_out = timeline_start_frame + int(round(float(range_out) * fps)) - 1
+                rendered_timeline_audio = resolve_service.render_current_timeline_audio(
+                    "finlaycut_transcript",
+                    mark_in_frame=render_mark_in,
+                    mark_out_frame=render_mark_out,
+                    fallback_restore_page="edit",
+                )
+                if not rendered_timeline_audio:
+                    return {"error": "Could not extract audio from any timeline clips."}
+                logger.info("Using rendered timeline audio fallback for transcript extraction")
+                await manager.send_progress("transcript_editor", 0.10, "Using rendered timeline audio...")
+                audio_path = rendered_timeline_audio
+                audio_offset = 0.0
+                cached_audio_duration = timeline_duration_seconds
+                analysis_audio_source = "rendered_master_mix"
+                analysis_audio_fallback_reason = None
+            else:
+                extraction_segments: list[dict] = []
                 await manager.send_progress(
                     "transcript_editor",
-                    pct,
-                    f"Extracting audio ({i + 1}/{len(clip_contexts)} clips)...",
+                    0.02,
+                    f"Extracting audio from {len(clip_contexts)} clip(s)...{range_label}",
                 )
 
-                # Extract full audio from source file (cached per unique file)
-                if file_path not in audio_cache:
-                    audio_cache[file_path] = extract_audio(file_path)
-                full_audio = audio_cache[file_path]
+                # Extract audio for each clip's source range
+                audio_cache: dict[str, str] = {}  # source file -> extracted WAV path
 
-                # Extract just the source range visible in the timeline
-                source_start_seconds = clip_context.get("source_start_seconds")
-                source_end_seconds = clip_context.get("source_end_seconds")
-                if source_start_seconds is not None and source_end_seconds is not None:
-                    try:
-                        clip_audio = extract_audio_segment(
-                            full_audio,
-                            float(source_start_seconds),
-                            float(source_end_seconds),
-                        )
-                    except Exception as e:
-                        logger.warning("Segment extraction failed for clip %d (%s), using full audio", i, e)
-                        clip_audio = full_audio
+                for i, clip_context in enumerate(clip_contexts):
+                    file_path = str(clip_context["file_path"])
+                    clip_timeline_start_sec = float(clip_context["clip_timeline_offset"])
+                    clip_duration_sec = float(clip_context["clip_duration_seconds"])
+                    clip_timeline_end_sec = clip_timeline_start_sec + clip_duration_sec
+
+                    # Skip clips entirely outside the in/out range
+                    if is_range:
+                        if clip_timeline_end_sec <= range_in or clip_timeline_start_sec >= range_out:
+                            continue
+
+                    pct = 0.02 + (i / len(clip_contexts)) * 0.08
+                    await manager.send_progress(
+                        "transcript_editor",
+                        pct,
+                        f"Extracting audio ({i + 1}/{len(clip_contexts)} clips)...",
+                    )
+
+                    # Extract full audio from source file (cached per unique file)
+                    if file_path not in audio_cache:
+                        audio_cache[file_path] = extract_audio(file_path)
+                    full_audio = audio_cache[file_path]
+
+                    # Extract just the source range visible in the timeline
+                    source_start_seconds = clip_context.get("source_start_seconds")
+                    source_end_seconds = clip_context.get("source_end_seconds")
+                    if source_start_seconds is not None and source_end_seconds is not None:
+                        try:
+                            clip_audio = extract_audio_segment(
+                                full_audio,
+                                float(source_start_seconds),
+                                float(source_end_seconds),
+                            )
+                        except Exception as e:
+                            logger.warning("Segment extraction failed for clip %d (%s), using full audio", i, e)
+                            clip_audio = full_audio
+                    else:
+                        # No source range — cap to clip duration to avoid using full source file
+                        try:
+                            clip_audio = extract_audio_segment(full_audio, 0, clip_duration_sec)
+                        except Exception:
+                            clip_audio = full_audio
+
+                    extraction_segments.append({
+                        "audio_path": clip_audio,
+                        "timeline_start_seconds": clip_timeline_start_sec,
+                        "duration_seconds": clip_duration_sec,
+                    })
+
+                if not extraction_segments:
+                    return {"error": "No clips found in the selected range." if is_range else "Could not extract audio from any timeline clips."}
+
+                # Assemble into single timeline audio
+                await manager.send_progress("transcript_editor", 0.10, "Assembling timeline audio...")
+
+                if len(extraction_segments) == 1 and not is_range:
+                    # Single clip full timeline — use its audio directly, track the timeline offset
+                    audio_path = extraction_segments[0]["audio_path"]
+                    audio_offset = extraction_segments[0]["timeline_start_seconds"]
+                    cached_audio_duration = float(extraction_segments[0]["duration_seconds"])
+                    analysis_audio_source = "per_clip_best_track"
+                    analysis_audio_fallback_reason = "master_mix_disabled"
                 else:
-                    # No source range — cap to clip duration to avoid using full source file
-                    try:
-                        clip_audio = extract_audio_segment(full_audio, 0, clip_duration_sec)
-                    except Exception:
-                        clip_audio = full_audio
-
-                clip_segments.append({
-                    "audio_path": clip_audio,
-                    "timeline_start_seconds": clip_timeline_start_sec,
-                    "timeline_end_seconds": clip_timeline_end_sec,
-                    "duration_seconds": clip_duration_sec,
-                    "timeline_start_frame": clip_start_frame,
-                    "timeline_end_frame": clip_end_frame,
-                    "source_start_frame": int(clip_context["source_start_frame"]) if clip_context.get("source_start_frame") is not None else None,
-                    "source_end_frame": int(clip_context["source_end_frame"]) if clip_context.get("source_end_frame") is not None else None,
-                    "file_path": file_path,
-                    "clip_item_id": clip_context.get("clip_item_id"),
-                })
-
-            if not clip_segments:
-                return {"error": "No clips found in the selected range." if is_range else "Could not extract audio from any timeline clips."}
-
-            # Assemble into single timeline audio
-            await manager.send_progress("transcript_editor", 0.10, "Assembling timeline audio...")
-
-            if len(clip_segments) == 1 and not is_range:
-                # Single clip full timeline — use its audio directly, track the timeline offset
-                audio_path = clip_segments[0]["audio_path"]
-                audio_offset = clip_segments[0]["timeline_start_seconds"]
-                cached_audio_duration = float(clip_segments[0]["duration_seconds"])
-            else:
-                # Multiple clips or range mode — stitch into one file with correct timeline positions
-                audio_path = assemble_timeline_audio(clip_segments, timeline_duration_seconds)
-                audio_offset = 0.0  # Assembled audio starts at timeline start
-                cached_audio_duration = timeline_duration_seconds
+                    # Multiple clips or range mode — stitch into one file with correct timeline positions
+                    audio_path = assemble_timeline_audio(extraction_segments, timeline_duration_seconds)
+                    audio_offset = 0.0  # Assembled audio starts at timeline start
+                    cached_audio_duration = timeline_duration_seconds
+                    analysis_audio_source = "assembled_best_track"
+                    analysis_audio_fallback_reason = "master_mix_disabled"
 
         # If range mode, trim the assembled audio to just the in/out range
         if is_range and audio_offset == 0.0:
@@ -422,6 +517,7 @@ async def transcribe_timeline(request: TranscribeRequest):
             offset=float(audio_offset),
             timeline_signature=timeline_signature,
             covers_full_timeline=covers_full_timeline,
+            audio_source=analysis_audio_source,
         )
 
         # Transcribe with real progress
@@ -595,6 +691,8 @@ async def transcribe_timeline(request: TranscribeRequest):
             "word_count": len(words),
             "filler_detections": filler_detections,
             "range": {"in_seconds": range_in, "out_seconds": range_out} if is_range else None,
+            "analysis_audio_source": analysis_audio_source,
+            "analysis_audio_fallback_reason": analysis_audio_fallback_reason,
             "segments": speaker_segments,
             "speakers": speaker_summaries,
             "speaker_count": len(speaker_summaries),
@@ -602,6 +700,20 @@ async def transcribe_timeline(request: TranscribeRequest):
             "speaker_fallback_reason": speaker_fallback_reason,
             "speaker_detection_error": speaker_detection_error,
         }
+        if timeline_signature:
+            try:
+                persisted = clip_search_service.persist_transcript_payload(
+                    timeline_signature,
+                    [dict(word) for word in words],
+                    replace_existing=not is_range,
+                )
+                logger.info(
+                    "Persisted transcript search text for %d clip bucket(s) on timeline '%s'",
+                    persisted,
+                    transcript_session.get("timeline_name") if transcript_session else timeline.GetName(),
+                )
+            except Exception as exc:
+                logger.warning("Failed to persist transcript data for clip search: %s", exc)
         logger.info(
             "Transcript complete for '%s': %d words, session_bound=%s, range=%s",
             transcript_session.get("timeline_name") if transcript_session else timeline.GetName(),
@@ -695,7 +807,7 @@ async def reconcile_transcript(request: ReconcileRequest):
             ),
         }
 
-    return {
+    payload = {
         "success": True,
         "words": result.get("words", []),
         "transcript_context": result.get("transcript_context"),
@@ -708,6 +820,15 @@ async def reconcile_transcript(request: ReconcileRequest):
         },
         "message": "Transcript synced to the current timeline. Re-run fillers, silences, and speakers if needed.",
     }
+    try:
+        clip_search_service.persist_transcript_payload(
+            str(signature_info.get("timeline_signature") or ""),
+            payload["words"],
+            replace_existing=True,
+        )
+    except Exception as exc:
+        logger.warning("Failed to persist reconciled transcript data for clip search: %s", exc)
+    return payload
 
 
 @router.post("/apply")
@@ -800,23 +921,49 @@ async def apply_transcript_edits(request: ApplyRequest):
 
     cut_frame_ranges: list[tuple[int, int]]
     kept_segments_for_service: list[dict]
+    applied_cut_segments: list[dict]
     has_explicit_cut_segments = request.cut_segments is not None
 
     if has_explicit_cut_segments:
-        raw_cut_ranges = [
-            frame_range
-            for seg in (request.cut_segments or [])
-            for frame_range in [_resolved_frame_range(seg)]
-            if frame_range is not None
-        ]
-        cut_frame_ranges = _merge_frame_ranges(raw_cut_ranges)
-        kept_frame_ranges = _subtract_frame_ranges(tl_start, tl_end, cut_frame_ranges)
-        kept_segments_for_service = [
-            _frame_range_to_segment(start_frame, end_frame, tl_start, fps)
-            for start_frame, end_frame in kept_frame_ranges
-        ]
+        raw_cut_candidates = []
+        for seg in (request.cut_segments or []):
+            frame_range = _resolved_frame_range(seg)
+            if frame_range is None:
+                continue
+            seg_start_frame, seg_end_frame = frame_range
+            raw_cut_candidates.append({
+                "start": (seg_start_frame - tl_start) / fps,
+                "end": (seg_end_frame - tl_start) / fps,
+                "start_frame": seg_start_frame,
+                "end_frame": seg_end_frame,
+                "kind": seg.kind,
+                "label": seg.label,
+                "boundary_source": seg.boundary_source,
+                "prev_word_end": seg.prev_word_end,
+                "next_word_start": seg.next_word_start,
+                "prev_word_end_frame": seg.prev_word_end_frame,
+                "next_word_start_frame": seg.next_word_start_frame,
+                "padding_ms": seg.padding_ms,
+            })
+
+        refinement = cut_refiner_service.refine_cut_candidates(
+            raw_cut_candidates,
+            name_prefix="finlaycut_transcript_apply",
+            default_silence_padding_ms=int(getattr(settings, "silence_padding_ms", 100)),
+        )
+        if refinement.get("error"):
+            return {"error": refinement["error"]}
+
+        cut_frame_ranges = list(refinement["cut_frame_ranges"])
+        kept_segments_for_service = list(refinement["kept_segments"])
+        applied_cut_segments = list(refinement["applied_cut_segments"])
 
         total_cut_frames = sum(end - start for start, end in cut_frame_ranges)
+        kept_frame_ranges = [
+            (int(seg["start_frame"]), int(seg["end_frame"]))
+            for seg in kept_segments_for_service
+            if seg.get("start_frame") is not None and seg.get("end_frame") is not None
+        ]
         total_kept_frames = sum(end - start for start, end in kept_frame_ranges)
         total_timeline_frames = tl_end - tl_start
         logger.info(
@@ -858,7 +1005,20 @@ async def apply_transcript_edits(request: ApplyRequest):
             for seg in kept_segments_for_service
             if seg.get("start_frame") is not None and seg.get("end_frame") is not None
         ])
-        cut_frame_ranges = _subtract_frame_ranges(tl_start, tl_end, kept_frame_ranges)
+        legacy_cut_ranges = _subtract_frame_ranges(tl_start, tl_end, kept_frame_ranges)
+        refinement = cut_refiner_service.refine_cut_candidates(
+            [
+                _frame_range_to_segment(start_frame, end_frame, tl_start, fps) | {"kind": "speech"}
+                for start_frame, end_frame in legacy_cut_ranges
+            ],
+            name_prefix="finlaycut_transcript_apply",
+            default_silence_padding_ms=int(getattr(settings, "silence_padding_ms", 100)),
+        )
+        if refinement.get("error"):
+            return {"error": refinement["error"]}
+        cut_frame_ranges = list(refinement["cut_frame_ranges"])
+        kept_segments_for_service = list(refinement["kept_segments"])
+        applied_cut_segments = list(refinement["applied_cut_segments"])
 
     if not kept_segments_for_service:
         return {"error": "Nothing would remain after applying those transcript edits"}
@@ -972,5 +1132,6 @@ async def apply_transcript_edits(request: ApplyRequest):
         "timeline_name": result.get("timeline_name"),
         "updated_transcript_context": updated_context,
         "transcript_session": _build_transcript_session(next_signature, "transcript_apply") if next_signature is not None else None,
+        "applied_cut_segments": applied_cut_segments,
         "message": message
     }

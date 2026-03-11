@@ -23,10 +23,6 @@ class ResolveService:
         self._connected = False
         self._last_connect_attempt = 0
         self._reconnect_interval = 2.0  # seconds
-        # Signature watching (set via WebSocket from frontend)
-        self._watched_signature: str | None = None
-        self._watched_timeline_name: str | None = None
-        self._last_timeline_signature: str | None = None
         self._signature_poll_counter: int = 0
 
     def _debug_enabled(self) -> bool:
@@ -38,7 +34,15 @@ class ResolveService:
 
     @property
     def connected(self) -> bool:
-        return self._connected and self._resolve is not None
+        if self._connected and self._resolve is not None:
+            return True
+
+        # Resolve occasionally drops a single scripting call even while the app
+        # is still open. If we still have a Resolve handle, retry immediately.
+        if self._resolve is not None:
+            return self.try_connect()
+
+        return False
 
     @property
     def resolve(self):
@@ -46,6 +50,7 @@ class ResolveService:
 
     def try_connect(self) -> bool:
         """Attempt to connect to DaVinci Resolve."""
+        self._last_connect_attempt = time.monotonic()
         try:
             self._resolve = get_resolve()
             if self._resolve is not None:
@@ -61,6 +66,66 @@ class ResolveService:
             self._connected = False
             self._resolve = None
             return False
+
+    def _serialize_timeline_info(self, timeline) -> dict | None:
+        if timeline is None:
+            return None
+
+        try:
+            return {
+                "name": timeline.GetName(),
+                "duration": timeline.GetEndFrame() - timeline.GetStartFrame(),
+                "start_frame": timeline.GetStartFrame(),
+                "end_frame": timeline.GetEndFrame(),
+                "video_tracks": timeline.GetTrackCount("video"),
+                "audio_tracks": timeline.GetTrackCount("audio"),
+                "subtitle_tracks": timeline.GetTrackCount("subtitle"),
+                "framerate": str(timeline.GetSetting("timelineFrameRate")),
+                "resolution": (
+                    f"{timeline.GetSetting('timelineResolutionWidth')}"
+                    f"x{timeline.GetSetting('timelineResolutionHeight')}"
+                ),
+            }
+        except Exception as exc:
+            logger.warning("Failed to serialize timeline info: %s", exc)
+            return None
+
+    def _get_cached_timeline_name(self, project_name: str | None = None) -> str | None:
+        info = self._last_project_info or {}
+        cached_project_name = info.get("project_name")
+        if project_name and cached_project_name and cached_project_name != project_name:
+            return None
+
+        timeline = info.get("current_timeline") or {}
+        name = timeline.get("name")
+        if isinstance(name, str) and name.strip():
+            return name
+        return None
+
+    def _find_timeline_by_name(self, project, timeline_name: str | None):
+        if project is None or not timeline_name:
+            return None
+
+        try:
+            timeline_count = int(project.GetTimelineCount() or 0)
+        except Exception as exc:
+            logger.warning("Failed to enumerate Resolve timelines: %s", exc)
+            return None
+
+        for index in range(1, timeline_count + 1):
+            try:
+                timeline = project.GetTimelineByIndex(index)
+            except Exception:
+                continue
+            if timeline is None:
+                continue
+            try:
+                if timeline.GetName() == timeline_name:
+                    return timeline
+            except Exception:
+                continue
+
+        return None
 
     def get_status(self) -> dict:
         """Get current connection status and project info."""
@@ -82,6 +147,24 @@ class ResolveService:
                     return {"connected": False, "project": None, "timeline": None, "using_cached": False}
                 logger.warning("Resolve status lookup returned no project info; using cached status")
                 using_cached = True
+
+            if info.get("current_timeline") is None:
+                cached_timeline = self._last_project_info.get("current_timeline") if self._last_project_info else None
+                recovered_timeline = self.get_current_timeline()
+                recovered_info = self._serialize_timeline_info(recovered_timeline)
+                if recovered_info is not None:
+                    info = {
+                        **info,
+                        "current_timeline": recovered_info,
+                    }
+                    using_cached = True
+                elif cached_timeline and cached_timeline.get("name"):
+                    logger.warning("Resolve returned no current timeline; using cached timeline info")
+                    info = {
+                        **info,
+                        "current_timeline": cached_timeline,
+                    }
+                    using_cached = True
 
             self._last_project_info = info
             return {
@@ -109,35 +192,17 @@ class ResolveService:
             self._connected = False
             return {"connected": False, "project": None, "timeline": None, "using_cached": False}
 
-    def set_watched_signature(self, signature: str | None, timeline_name: str | None = None):
-        """Store the signature the frontend wants us to watch for changes."""
-        if signature is not None and signature == self._watched_signature:
-            return  # already watching this exact signature — avoid resetting counter
-        self._watched_signature = signature
-        self._watched_timeline_name = timeline_name
-        self._last_timeline_signature = signature  # baseline
-        self._signature_poll_counter = 0
-        if signature:
-            logger.info("Now watching timeline signature for '%s'", timeline_name or "unknown")
-        else:
-            logger.info("Stopped watching timeline signature")
-
     async def _check_timeline_signature(self, ws_manager):
-        """Compare current timeline signature to watched value; broadcast if changed."""
-        if not self._watched_signature or not self.connected:
+        """Compare the current timeline signature and notify subscribed clients."""
+        if not self.connected or not ws_manager.has_signature_watches():
             return
         try:
             sig_data = self.get_timeline_signature()
             if sig_data is None:
                 return
-            current = sig_data["timeline_signature"]
-            if current == self._last_timeline_signature:
-                return
-            # Signature changed
-            self._last_timeline_signature = current
-            await ws_manager.send_timeline_changed(
-                current,
-                sig_data.get("timeline_name", self._watched_timeline_name or ""),
+            await ws_manager.notify_timeline_watchers(
+                sig_data["timeline_signature"],
+                sig_data.get("timeline_name", ""),
             )
         except Exception as e:
             logger.debug("Signature check error: %s", e)
@@ -161,11 +226,13 @@ class ResolveService:
                         await asyncio.to_thread(self.try_connect)
 
                     # Check timeline signature every 2nd cycle (~4s)
-                    if self._watched_signature:
+                    if ws_manager.has_signature_watches():
                         self._signature_poll_counter += 1
                         if self._signature_poll_counter >= 2:
                             self._signature_poll_counter = 0
                             await self._check_timeline_signature(ws_manager)
+                    else:
+                        self._signature_poll_counter = 0
 
                 await asyncio.sleep(self._reconnect_interval)
             except asyncio.CancelledError:
@@ -180,9 +247,17 @@ class ResolveService:
             return None
         try:
             return self._resolve.GetProjectManager()
-        except Exception:
+        except Exception as exc:
+            logger.warning("Resolve project manager lookup failed, retrying connection: %s", exc)
             self._connected = False
-            return None
+            if not self.try_connect() or self._resolve is None:
+                return None
+            try:
+                return self._resolve.GetProjectManager()
+            except Exception as retry_exc:
+                logger.warning("Resolve project manager retry failed: %s", retry_exc)
+                self._connected = False
+                return None
 
     def get_current_project(self):
         """Get the current project object."""
@@ -200,9 +275,29 @@ class ResolveService:
         if project is None:
             return None
         try:
-            return project.GetCurrentTimeline()
+            timeline = project.GetCurrentTimeline()
+            if timeline is not None:
+                return timeline
+        except Exception as exc:
+            logger.warning("Resolve current timeline lookup failed: %s", exc)
+
+        project_name = None
+        try:
+            project_name = project.GetName()
         except Exception:
-            return None
+            project_name = None
+
+        cached_timeline_name = self._get_cached_timeline_name(project_name)
+        if cached_timeline_name:
+            fallback = self._find_timeline_by_name(project, cached_timeline_name)
+            if fallback is not None:
+                logger.warning(
+                    "Resolve returned no current timeline; falling back to cached timeline %s",
+                    cached_timeline_name,
+                )
+                return fallback
+
+        return None
 
     def get_media_pool(self):
         """Get the media pool object."""
@@ -915,6 +1010,59 @@ class ResolveService:
         except Exception:
             return []
 
+    def get_timeline_video_clip_contexts(
+        self,
+        track_index: int = 1,
+        in_frame: int | None = None,
+        out_frame: int | None = None,
+    ) -> dict:
+        """
+        Return clip contexts for a video track, optionally filtered to an in/out range.
+
+        The returned context shape mirrors get_clip_audio_context() so downstream
+        features can reason about timeline and source time in one format.
+        """
+        timeline = self.get_current_timeline()
+        base_result = {
+            "timeline": timeline,
+            "contexts": [],
+            "track_index": int(track_index),
+            "clip_count": 0,
+            "usable_count": 0,
+            "has_any_items": False,
+            "range_in_frame": int(in_frame) if in_frame is not None else None,
+            "range_out_frame": int(out_frame) if out_frame is not None else None,
+        }
+        if timeline is None:
+            return base_result
+
+        items = self.get_timeline_clips("video", track_index)
+        base_result["clip_count"] = len(items)
+        base_result["has_any_items"] = bool(items)
+        if not items:
+            return base_result
+
+        contexts: list[dict] = []
+        for item in items:
+            context = self.get_clip_audio_context(item)
+            if context is None:
+                continue
+            clip_start_frame = int(context["clip_start_frame"])
+            clip_end_frame = int(context["clip_end_frame"])
+            if in_frame is not None and clip_end_frame <= int(in_frame):
+                continue
+            if out_frame is not None and clip_start_frame >= int(out_frame):
+                continue
+
+            context["track_type"] = "video"
+            context["track_index"] = int(track_index)
+            context["clip_name"] = self.get_timeline_item_name(item)
+            contexts.append(context)
+
+        base_result["contexts"] = contexts
+        base_result["usable_count"] = len(contexts)
+        return base_result
+
     def _iter_audio_extraction_track_candidates(self, timeline, preferred_track_index: int = 1):
         """Yield track candidates in a stable priority order for timeline audio extraction."""
         seen: set[tuple[str, int]] = set()
@@ -1452,6 +1600,40 @@ class ResolveService:
             return None
         value_str = str(value).strip()
         return value_str or None
+
+    def get_timeline_item_name(self, timeline_item) -> str:
+        """Return the best available display name for a timeline item."""
+        for method_name in ("GetName", "GetClipName"):
+            value = self._call_timeline_item_str_method(timeline_item, method_name)
+            if value:
+                return value
+        try:
+            media_pool_item = timeline_item.GetMediaPoolItem()
+        except Exception:
+            media_pool_item = None
+        if media_pool_item is not None:
+            for method_name in ("GetName",):
+                method = getattr(media_pool_item, method_name, None)
+                if callable(method):
+                    try:
+                        value = method()
+                    except Exception:
+                        value = None
+                    if value:
+                        return str(value)
+            try:
+                props = media_pool_item.GetClipProperty()
+            except Exception:
+                props = None
+            if isinstance(props, dict):
+                for key in ("Clip Name", "File Name"):
+                    value = props.get(key)
+                    if value:
+                        return str(value)
+        file_path = self.get_clip_file_path(timeline_item)
+        if file_path:
+            return Path(file_path).name
+        return "Clip"
 
     def get_timeline_item_unique_id(self, timeline_item) -> str | None:
         """Return a stable Resolve unique ID for a timeline item if available."""
@@ -2141,15 +2323,292 @@ class ResolveService:
             logger.error("Error getting timeline info: %s", e)
             return None
 
-    def add_marker(self, frame_id: int, color: str, name: str, note: str = "", duration: int = 1) -> bool:
+    def _managed_marker_note_prefix(self, namespace: str) -> str:
+        return f"[{namespace}]"
+
+    def _managed_marker_custom_data_prefix(self, namespace: str) -> str:
+        return f"{namespace}:"
+
+    def _managed_marker_note_token(self, namespace: str) -> str:
+        label = namespace.split(":", 1)[-1].replace("-", " ").strip() or "marker preview"
+        return f"\n\nCreated by FinlayCut {label}"
+
+    def _get_markers_on_target(self, target) -> list[dict]:
+        """Return markers from a timeline or timeline item in a normalized format."""
+        if target is None:
+            return []
+
+        get_markers = getattr(target, "GetMarkers", None)
+        if not callable(get_markers):
+            return []
+
+        try:
+            raw_markers = get_markers() or {}
+        except Exception as e:
+            logger.warning("Failed to read markers from Resolve target: %s", e)
+            return []
+
+        markers: list[dict] = []
+        if not isinstance(raw_markers, dict):
+            return markers
+
+        for frame_key, marker in raw_markers.items():
+            try:
+                frame_id = int(frame_key)
+            except Exception:
+                continue
+
+            data = marker if isinstance(marker, dict) else {}
+            try:
+                duration = int(data.get("duration") or 1)
+            except Exception:
+                duration = 1
+
+            markers.append(
+                {
+                    "frame_id": frame_id,
+                    "color": str(data.get("color") or ""),
+                    "name": str(data.get("name") or ""),
+                    "note": str(data.get("note") or ""),
+                    "duration": max(1, duration),
+                    "custom_data": str(data.get("customData") or data.get("custom_data") or ""),
+                }
+            )
+
+        markers.sort(key=lambda marker: marker["frame_id"])
+        return markers
+
+    def get_timeline_markers(self) -> list[dict]:
+        """Return timeline markers in a normalized format."""
+        timeline = self.get_current_timeline()
+        if timeline is None:
+            return []
+        return self._get_markers_on_target(timeline)
+
+    def _marker_matches_namespace(self, marker: dict, namespace: str) -> bool:
+        custom_data_prefix = self._managed_marker_custom_data_prefix(namespace)
+        note_prefix = self._managed_marker_note_prefix(namespace)
+        note_token = self._managed_marker_note_token(namespace)
+        note = str(marker.get("note") or "")
+        custom_data = str(marker.get("custom_data") or "")
+        return (
+            custom_data.startswith(custom_data_prefix)
+            or note.startswith(note_prefix)
+            or note.endswith(note_token)
+        )
+
+    def _clear_managed_markers_on_target(self, target, namespace: str) -> dict:
+        """Delete FinlayCut-managed markers from a timeline or timeline item."""
+        if target is None:
+            return {"success": False, "error": "No active marker target"}
+
+        managed_frames = [
+            int(marker["frame_id"])
+            for marker in self._get_markers_on_target(target)
+            if self._marker_matches_namespace(marker, namespace)
+        ]
+        if not managed_frames:
+            return {"success": True, "deleted_count": 0}
+
+        delete_marker_at_frame = getattr(target, "DeleteMarkerAtFrame", None)
+        if not callable(delete_marker_at_frame):
+            return {"success": False, "error": "Resolve does not expose marker deletion through the scripting API"}
+
+        deleted = 0
+        for frame_id in managed_frames:
+            try:
+                if delete_marker_at_frame(int(frame_id)):
+                    deleted += 1
+            except Exception as e:
+                logger.warning("Failed to delete marker at frame %s: %s", frame_id, e)
+
+        return {"success": deleted == len(managed_frames), "deleted_count": deleted}
+
+    def clear_managed_timeline_markers(self, namespace: str) -> dict:
+        """Delete only timeline markers created by FinlayCut within the given namespace."""
+        timeline = self.get_current_timeline()
+        if timeline is None:
+            return {"success": False, "error": "No active timeline"}
+        return self._clear_managed_markers_on_target(timeline, namespace)
+
+    def clear_managed_timeline_item_markers(
+        self,
+        namespace: str,
+        media_types: tuple[str, ...] = ("video", "audio"),
+    ) -> dict:
+        """Delete FinlayCut-managed markers from timeline items across the current timeline."""
+        records = self._get_timeline_item_records(media_types=media_types)
+        if not records:
+            return {"success": True, "deleted_count": 0}
+
+        deleted_total = 0
+        seen_items: set[int] = set()
+        for record in records:
+            item = record.get("item")
+            if item is None:
+                continue
+            item_key = id(item)
+            if item_key in seen_items:
+                continue
+            seen_items.add(item_key)
+
+            result = self._clear_managed_markers_on_target(item, namespace)
+            if result.get("error"):
+                continue
+            deleted_total += int(result.get("deleted_count") or 0)
+
+        return {"success": True, "deleted_count": deleted_total}
+
+    def add_marker(
+        self,
+        frame_id: int,
+        color: str,
+        name: str,
+        note: str = "",
+        duration: int = 1,
+        custom_data: str = "",
+    ) -> bool:
         """Add a marker to the current timeline."""
         timeline = self.get_current_timeline()
         if timeline is None:
             return False
         try:
-            return timeline.AddMarker(frame_id, color, name, note, duration)
+            normalized_duration = max(1, int(duration))
+            if custom_data:
+                try:
+                    return bool(timeline.AddMarker(frame_id, color, name, note, normalized_duration, custom_data))
+                except Exception:
+                    pass
+            return bool(timeline.AddMarker(frame_id, color, name, note, normalized_duration))
         except Exception:
             return False
+
+    def _apply_managed_markers_to_target(self, target, namespace: str, markers: list[dict]) -> dict:
+        if target is None:
+            return {"success": False, "error": "No active marker target"}
+
+        note_token = self._managed_marker_note_token(namespace)
+        custom_data_prefix = self._managed_marker_custom_data_prefix(namespace)
+        applied = 0
+        failed_frames: list[int] = []
+
+        for marker in markers:
+            try:
+                frame_id = int(marker["frame_id"])
+            except Exception:
+                continue
+
+            try:
+                duration = max(1, int(marker.get("duration") or 1))
+            except Exception:
+                duration = 1
+
+            name = str(marker.get("name") or "FinlayCut Marker").strip() or "FinlayCut Marker"
+            note = str(marker.get("note") or "").strip()
+            fallback_note = note
+            if note_token not in fallback_note:
+                fallback_note = f"{fallback_note}{note_token}" if fallback_note else note_token.strip()
+
+            raw_custom_data = str(marker.get("custom_data") or "").strip()
+            custom_data = raw_custom_data if raw_custom_data.startswith(custom_data_prefix) else (
+                f"{custom_data_prefix}{raw_custom_data or frame_id}"
+            )
+            color = str(marker.get("color") or "Yellow")
+
+            success = False
+            if custom_data:
+                try:
+                    success = bool(target.AddMarker(frame_id, color, name, note, duration, custom_data))
+                except Exception:
+                    success = False
+            if not success:
+                try:
+                    success = bool(target.AddMarker(frame_id, color, name, fallback_note, duration))
+                except Exception:
+                    success = False
+
+            if success:
+                applied += 1
+                continue
+            failed_frames.append(frame_id)
+
+        return {
+            "success": not failed_frames,
+            "applied_count": applied,
+            "failed_frames": failed_frames,
+        }
+
+    def refresh_managed_timeline_markers(self, namespace: str, markers: list[dict]) -> dict:
+        """Replace FinlayCut-managed timeline markers inside a namespace."""
+        timeline = self.get_current_timeline()
+        if timeline is None:
+            return {"success": False, "error": "No active timeline"}
+
+        clear_result = self.clear_managed_timeline_markers(namespace)
+        if clear_result.get("error"):
+            return clear_result
+        apply_result = self._apply_managed_markers_to_target(timeline, namespace, markers)
+
+        return {
+            "success": not apply_result.get("failed_frames"),
+            "deleted_count": int(clear_result.get("deleted_count") or 0),
+            "applied_count": int(apply_result.get("applied_count") or 0),
+            "failed_frames": list(apply_result.get("failed_frames") or []),
+        }
+
+    def refresh_managed_markers(
+        self,
+        namespace: str,
+        timeline_markers: list[dict] | None = None,
+        timeline_item_markers: list[dict] | None = None,
+        clear_item_media_types: tuple[str, ...] = ("video", "audio"),
+    ) -> dict:
+        """Refresh FinlayCut-managed markers across timeline and timeline items."""
+        timeline = self.get_current_timeline()
+        if timeline is None:
+            return {"success": False, "error": "No active timeline"}
+
+        timeline_markers = timeline_markers or []
+        timeline_item_markers = timeline_item_markers or []
+
+        timeline_clear_result = self.clear_managed_timeline_markers(namespace)
+        if timeline_clear_result.get("error"):
+            return timeline_clear_result
+
+        item_clear_result = self.clear_managed_timeline_item_markers(
+            namespace,
+            media_types=clear_item_media_types,
+        )
+        if item_clear_result.get("error"):
+            return item_clear_result
+
+        timeline_apply_result = self._apply_managed_markers_to_target(
+            timeline,
+            namespace,
+            timeline_markers,
+        )
+
+        item_applied_count = 0
+        item_failed_frames: list[int] = []
+        for marker in timeline_item_markers:
+            item = marker.get("item")
+            if item is None:
+                continue
+            apply_result = self._apply_managed_markers_to_target(item, namespace, [marker])
+            item_applied_count += int(apply_result.get("applied_count") or 0)
+            item_failed_frames.extend(int(frame) for frame in (apply_result.get("failed_frames") or []))
+
+        return {
+            "success": not timeline_apply_result.get("failed_frames") and not item_failed_frames,
+            "timeline_deleted_count": int(timeline_clear_result.get("deleted_count") or 0),
+            "timeline_item_deleted_count": int(item_clear_result.get("deleted_count") or 0),
+            "deleted_count": int(timeline_clear_result.get("deleted_count") or 0) + int(item_clear_result.get("deleted_count") or 0),
+            "timeline_applied_count": int(timeline_apply_result.get("applied_count") or 0),
+            "timeline_item_applied_count": item_applied_count,
+            "applied_count": int(timeline_apply_result.get("applied_count") or 0) + item_applied_count,
+            "failed_frames": list(timeline_apply_result.get("failed_frames") or []),
+            "timeline_item_failed_frames": item_failed_frames,
+        }
 
     def _normalize_time_segments(self, segments: list[dict], merge_gap: float = 0.0) -> list[dict]:
         normalized: list[dict] = []
@@ -2744,17 +3203,89 @@ class ResolveService:
 
         timelines = []
         try:
+            current_timeline = self.get_current_timeline()
+            current_name = None
+            if current_timeline is not None:
+                try:
+                    current_name = current_timeline.GetName()
+                except Exception:
+                    current_name = None
             count = project.GetTimelineCount()
             for i in range(1, count + 1):
                 tl = project.GetTimelineByIndex(i)
                 if tl:
+                    timeline_name = tl.GetName()
+                    is_current = bool(current_timeline is not None and tl == current_timeline)
+                    if not is_current and current_name:
+                        is_current = timeline_name == current_name
                     timelines.append({
                         "index": i,
-                        "name": tl.GetName(),
+                        "name": timeline_name,
+                        "is_current": is_current,
                     })
         except Exception:
             pass
         return timelines
+
+    def set_current_timeline_by_index(self, timeline_index: int) -> dict:
+        """Switch the active Resolve timeline by 1-based project index."""
+        project = self.get_current_project()
+        if project is None:
+            return {"success": False, "error": "No active Resolve project"}
+
+        try:
+            target_index = int(timeline_index)
+        except (TypeError, ValueError):
+            return {"success": False, "error": "Timeline index must be an integer"}
+
+        if target_index < 1:
+            return {"success": False, "error": "Timeline index must be 1 or greater"}
+
+        try:
+            target_timeline = project.GetTimelineByIndex(target_index)
+        except Exception as exc:
+            logger.warning("Failed to look up timeline %s: %s", target_index, exc)
+            target_timeline = None
+        if target_timeline is None:
+            return {"success": False, "error": f"Timeline {target_index} was not found in the current project"}
+
+        try:
+            target_name = target_timeline.GetName()
+        except Exception:
+            target_name = f"Timeline {target_index}"
+
+        try:
+            switched = project.SetCurrentTimeline(target_timeline)
+        except Exception as exc:
+            logger.warning("Failed to switch to timeline %s: %s", target_name, exc)
+            return {"success": False, "error": f"Could not switch to {target_name}: {exc}"}
+
+        active_timeline = self.get_current_timeline()
+        active_name = None
+        if active_timeline is not None:
+            try:
+                active_name = active_timeline.GetName()
+            except Exception:
+                active_name = None
+
+        success = switched is not False
+        if active_name is not None:
+            success = active_name == target_name
+        if not success:
+            return {"success": False, "error": f"Resolve did not switch to {target_name}"}
+
+        try:
+            info = get_project_info(self._resolve)
+            if info is not None:
+                self._last_project_info = info
+        except Exception:
+            pass
+
+        return {
+            "success": True,
+            "timeline_index": target_index,
+            "timeline_name": target_name,
+        }
 
 
 # Singleton instance

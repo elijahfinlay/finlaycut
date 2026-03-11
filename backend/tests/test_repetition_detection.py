@@ -115,8 +115,14 @@ class RepetitionDetectionTests(unittest.TestCase):
         self.assertEqual(len(groups), 1)
         self.assertEqual(groups[0]["takes"][0]["start_frame"], 100)
         self.assertEqual(groups[0]["takes"][0]["end_frame"], 108)
+        self.assertIsNone(groups[0]["takes"][0]["prev_word_end"])
+        self.assertEqual(groups[0]["takes"][0]["next_word_start"], 1.0)
+        self.assertEqual(groups[0]["takes"][0]["next_word_start_frame"], 124)
         self.assertEqual(groups[0]["takes"][1]["start_frame"], 124)
         self.assertEqual(groups[0]["takes"][1]["end_frame"], 134)
+        self.assertEqual(groups[0]["takes"][1]["prev_word_end"], 0.4)
+        self.assertEqual(groups[0]["takes"][1]["prev_word_end_frame"], 108)
+        self.assertIsNone(groups[0]["takes"][1]["next_word_start"])
 
 
 if __name__ == "__main__":

@@ -7,6 +7,8 @@
   "license": "MIT",
   "scripts": {
     "dev": "electron-vite dev",
+    "launch:local": "./scripts/launch-local.sh",
+    "launch:check": "./scripts/launch-local.sh --check",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "start": "electron-vite dev",

@@ -12,14 +12,16 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { id: 'transcript', label: 'Transcript Editor', icon: 'text-cursor', section: 'Features' },
   { id: 'silence', label: 'Silence Removal', icon: 'volume-x', section: 'Features' },
+  { id: 'filler', label: 'Filler Words', icon: 'message-circle-x', section: 'Features' },
   { id: 'captions', label: 'Captions', icon: 'subtitles', section: 'Features' },
   { id: 'zoom', label: 'Zoom Cuts', icon: 'zoom-in', section: 'Features' },
   { id: 'chapters', label: 'Chapters', icon: 'bookmark', section: 'Features' },
   { id: 'podcast', label: 'Podcast Editor', icon: 'mic', section: 'Features' },
-  { id: 'takes', label: 'Takes', icon: 'repeat', section: 'Features' },
+  { id: 'takes', label: 'Takes & Duplicates', icon: 'repeat', section: 'Features' },
   { id: 'viral', label: 'Viral Clips', icon: 'trending-up', section: 'Features' },
   { id: 'broll', label: 'B-Roll', icon: 'film', section: 'Features' },
   { id: 'scenes', label: 'Scene Detect', icon: 'scissors', section: 'Features' },
+  { id: 'clip-search', label: 'Clip Search', icon: 'search', section: 'Features' },
   { id: 'audio', label: 'Audio Enhance', icon: 'headphones', section: 'Extras' },
   { id: 'thumbnail', label: 'Thumbnails', icon: 'image', section: 'Extras' },
   { id: 'export', label: 'Export', icon: 'download', section: 'Extras' },
@@ -112,6 +114,12 @@ function NavIcon({ name }: { name: string }) {
     'download': (
       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
         <path strokeLinecap="round" strokeLinejoin="round" d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" />
+      </svg>
+    ),
+    'search': (
+      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+        <circle cx="11" cy="11" r="7" />
+        <path strokeLinecap="round" d="M20 20l-3.5-3.5" />
       </svg>
     ),
     'settings': (

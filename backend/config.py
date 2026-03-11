@@ -21,6 +21,7 @@ PERSISTED_FIELDS = [
     "claude_model", "whisper_model", "silence_threshold_db",
     "silence_min_duration_ms", "silence_min_duration_frames", "silence_padding_ms", "filler_words",
     "pexels_api_key", "cache_limit_gb", "backup_retention_days",
+    "vision_provider", "gemini_api_key", "vision_max_parallelism", "clip_search_storage_dir",
     "alignment_method", "alignment_waveform_refine", "alignment_confidence_threshold",
     "alignment_timing_offset_ms",
 ]
@@ -75,6 +76,12 @@ class Settings(BaseSettings):
     claude_api_key: Optional[str] = None
     claude_model: str = "claude-sonnet-4-5-20250514"
 
+    # Vision
+    vision_provider: str = "gemini"
+    gemini_api_key: Optional[str] = None
+    vision_max_parallelism: int = 4
+    clip_search_storage_dir: Optional[str] = None
+
     # B-Roll
     pexels_api_key: Optional[str] = None
 
@@ -85,6 +92,21 @@ class Settings(BaseSettings):
     # Debugging
     debug_cut_planning: bool = False
     debug_log_limit: int = 12
+
+    # Accuracy feature flags
+    enable_spoken_waveform_refiner: bool = False
+    enable_master_mix_analysis_default: bool = True
+
+    # Spoken waveform refinement tuning
+    spoken_refine_left_search_ms: int = 220
+    spoken_refine_right_search_ms: int = 320
+    spoken_refine_start_guard_ms: int = 12
+    spoken_refine_end_guard_ms: int = 32
+    spoken_refine_min_duration_ms: int = 30
+    spoken_refine_zero_cross_window_ms: float = 2.0
+    spoken_refine_expand_confidence_threshold: float = 0.52
+    spoken_refine_fallback_confidence_threshold: float = 0.28
+    spoken_refine_low_confidence_max_expand_ms: int = 45
 
     class Config:
         env_prefix = "FINLAYCUT_"

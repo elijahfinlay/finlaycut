@@ -5,10 +5,12 @@ from fastapi import APIRouter
 from models.silence import SilenceConfig, SilenceApplyRequest
 from services.resolve_service import resolve_service
 from services.audio_service import audio_service
+from services.cut_refiner_service import cut_refiner_service
 from utils.audio_utils import extract_audio, extract_audio_segment
 from utils.operation_queue import heavy_operation
-from utils.timeline_audio import assemble_current_timeline_audio
+from utils.timeline_audio import prepare_timeline_analysis_audio
 from api.websocket import manager
+from config import settings
 
 logger = logging.getLogger("finlaycut.silence")
 
@@ -115,6 +117,124 @@ def _trim_segment_by_padding(segment: dict, padding_ms: int) -> dict | None:
     return updated
 
 
+async def _analyze_silence_per_clip_fallback(
+    clips: list,
+    *,
+    config: SilenceConfig,
+    fps: float,
+    timeline_start_frame: int,
+    effective_min_duration_ms: int,
+) -> list[dict]:
+    audio_cache: dict[str, str] = {}
+    all_silences: list[dict] = []
+
+    await manager.send_progress("silence", 0.02, f"Extracting audio from {len(clips)} clip(s)...")
+
+    for clip_idx, clip in enumerate(clips):
+        file_path = resolve_service.get_clip_file_path(clip)
+        if not file_path:
+            logger.warning("Clip %d has no file path, skipping", clip_idx)
+            continue
+
+        clip_start_frame = int(clip.GetStart())
+        clip_end_frame = int(clip.GetEnd())
+        clip_timeline_offset = (clip_start_frame - timeline_start_frame) / fps
+
+        pct = 0.02 + (clip_idx / len(clips)) * 0.13
+        await manager.send_progress("silence", pct, f"Extracting audio ({clip_idx + 1}/{len(clips)} clips)...")
+
+        if file_path not in audio_cache:
+            audio_cache[file_path] = extract_audio(file_path)
+        full_audio = audio_cache[file_path]
+
+        source_range = resolve_service.get_timeline_item_source_range(clip)
+        if source_range:
+            src_start = source_range["source_start_frame"] / fps
+            src_end = source_range["source_end_frame"] / fps
+            try:
+                audio_path = extract_audio_segment(full_audio, src_start, src_end)
+            except Exception as e:
+                logger.warning("Segment extraction failed for clip %d (%s), using full audio", clip_idx, e)
+                audio_path = full_audio
+        else:
+            try:
+                left_offset = clip.GetLeftOffset()
+                clip_duration_frames = clip_end_frame - clip_start_frame
+                source_start = left_offset / fps
+                source_end = (left_offset + clip_duration_frames) / fps
+                audio_path = extract_audio_segment(full_audio, source_start, source_end)
+            except Exception as e:
+                logger.warning("Segment extraction failed for clip %d (%s), using full audio", clip_idx, e)
+                audio_path = full_audio
+
+        clip_progress_start = 0.15 + (clip_idx / len(clips)) * 0.75
+        clip_progress_range = 0.75 / len(clips)
+
+        async def progress_cb(pct, msg, _start=clip_progress_start, _range=clip_progress_range):
+            scaled = _start + pct * _range
+            await manager.send_progress("silence", scaled, msg)
+
+        silences = await audio_service.detect_silence_with_progress(
+            audio_path,
+            threshold_db=config.threshold_db,
+            min_duration_ms=effective_min_duration_ms,
+            progress_fn=progress_cb,
+        )
+        profile = audio_service.build_waveform_profile(audio_path)
+        silences = audio_service.refine_silence_segments_to_waveform(
+            audio_path,
+            silences,
+            min_duration_ms=max(20, int(effective_min_duration_ms * 0.25)),
+            profile=profile,
+        )
+
+        quiet_speech_segments = audio_service.detect_low_prominence_speech(
+            audio_path,
+            threshold_db=config.threshold_db,
+            min_duration_ms=max(250, int(effective_min_duration_ms * 0.85)),
+            quiet_delta_db=12.0,
+        )
+        quiet_speech_segments = audio_service.refine_segments_to_low_energy(
+            audio_path,
+            quiet_speech_segments,
+            max_shift_ms=40,
+            min_duration_ms=max(120, int(effective_min_duration_ms * 0.5)),
+            profile=profile,
+        )
+        candidate_segments = [*silences, *quiet_speech_segments]
+
+        for s in candidate_segments:
+            s["start"] += clip_timeline_offset
+            s["end"] += clip_timeline_offset
+            s["start_frame"] = clip_start_frame + int(round((s["start"] - clip_timeline_offset) * fps))
+            s["end_frame"] = clip_start_frame + int(round((s["end"] - clip_timeline_offset) * fps))
+
+        all_silences.extend(candidate_segments)
+
+    merged_segments = _merge_detected_segments([
+        {
+            **s,
+            "start_frame": int(s.get("start_frame", timeline_start_frame + int(round(s["start"] * fps)))),
+            "end_frame": int(s.get("end_frame", timeline_start_frame + int(round(s["end"] * fps)))),
+        }
+        for s in all_silences
+    ])
+    result_segments = []
+    for seg in merged_segments:
+        result_seg = _frame_range_to_segment(seg["start_frame"], seg["end_frame"], timeline_start_frame, fps)
+        if seg.get("kind"):
+            result_seg["kind"] = seg["kind"]
+        if seg.get("boundary_source"):
+            result_seg["boundary_source"] = seg["boundary_source"]
+        if seg.get("refine_confidence") is not None:
+            result_seg["refine_confidence"] = seg.get("refine_confidence")
+        if seg.get("refine_reason") is not None:
+            result_seg["refine_reason"] = seg.get("refine_reason")
+        result_seg["used_fallback_seed"] = bool(seg.get("used_fallback_seed", False))
+        result_segments.append(result_seg)
+    return result_segments
+
+
 @router.post("/analyze")
 @heavy_operation("Silence Analysis")
 async def analyze_silence(config: SilenceConfig):
@@ -143,121 +263,75 @@ async def analyze_silence(config: SilenceConfig):
 
     logger.info("Silence analysis: %d clips on timeline", len(clips))
 
-    await manager.send_progress("silence", 0.02, f"Extracting audio from {len(clips)} clip(s)...")
-
     try:
-        audio_cache: dict[str, str] = {}  # source file -> extracted WAV path
-        all_silences = []
-
-        for clip_idx, clip in enumerate(clips):
-            file_path = resolve_service.get_clip_file_path(clip)
-            if not file_path:
-                logger.warning("Clip %d has no file path, skipping", clip_idx)
-                continue
-
-            clip_start_frame = int(clip.GetStart())
-            clip_end_frame = int(clip.GetEnd())
-            clip_timeline_offset = (clip_start_frame - timeline_start_frame) / fps
-
-            # Progress: extraction phase uses 2-15% range
-            pct = 0.02 + (clip_idx / len(clips)) * 0.13
-            await manager.send_progress("silence", pct,
-                f"Extracting audio ({clip_idx + 1}/{len(clips)} clips)...")
-
-            # Extract full audio from source file (cached per unique file)
-            if file_path not in audio_cache:
-                audio_cache[file_path] = extract_audio(file_path)
-            full_audio = audio_cache[file_path]
-
-            # Extract just the source range visible in the timeline
-            source_range = resolve_service.get_timeline_item_source_range(clip)
-            if source_range:
-                src_start = source_range["source_start_frame"] / fps
-                src_end = source_range["source_end_frame"] / fps
-                try:
-                    audio_path = extract_audio_segment(full_audio, src_start, src_end)
-                except Exception as e:
-                    logger.warning("Segment extraction failed for clip %d (%s), using full audio", clip_idx, e)
-                    audio_path = full_audio
+        analysis_audio_source: str | None = None
+        analysis_audio_fallback_reason: str | None = None
+        if bool(getattr(settings, "enable_master_mix_analysis_default", True)):
+            await manager.send_progress("silence", 0.05, "Rendering timeline mix for silence analysis...")
+            analysis_audio = prepare_timeline_analysis_audio(
+                name_prefix="finlaycut_silence",
+                fallback_restore_page="edit",
+                allow_track_fallback=False,
+                reuse_cached_master_mix=True,
+            )
+            if analysis_audio.get("audio_path"):
+                audio_path = str(analysis_audio["audio_path"])
+                analysis_audio_source = str(analysis_audio.get("analysis_audio_source") or "rendered_master_mix")
+                analysis_audio_fallback_reason = (
+                    str(analysis_audio.get("analysis_audio_fallback_reason"))
+                    if analysis_audio.get("analysis_audio_fallback_reason") is not None
+                    else None
+                )
+                profile = audio_service.build_waveform_profile(audio_path)
+                detected_segments = audio_service.analyze_silence_candidates(
+                    audio_path,
+                    threshold_db=config.threshold_db,
+                    min_duration_ms=effective_min_duration_ms,
+                    require_dialogue_valley=True,
+                    profile=profile,
+                )
+                all_silences = []
+                for segment in detected_segments:
+                    start = float(segment.get("start", 0.0))
+                    end = float(segment.get("end", start))
+                    if end <= start:
+                        continue
+                    result_seg = _frame_range_to_segment(
+                        timeline_start_frame + int(round(start * fps)),
+                        timeline_start_frame + int(round(end * fps)),
+                        timeline_start_frame,
+                        fps,
+                    )
+                    if segment.get("kind"):
+                        result_seg["kind"] = segment.get("kind")
+                    if segment.get("boundary_source"):
+                        result_seg["boundary_source"] = segment.get("boundary_source")
+                    result_seg["refine_confidence"] = segment.get("refine_confidence")
+                    result_seg["refine_reason"] = segment.get("refine_reason")
+                    result_seg["used_fallback_seed"] = bool(segment.get("used_fallback_seed", False))
+                    all_silences.append(result_seg)
             else:
-                # Fallback: try left offset extraction
-                try:
-                    left_offset = clip.GetLeftOffset()
-                    clip_duration_frames = clip_end_frame - clip_start_frame
-                    source_start = left_offset / fps
-                    source_end = (left_offset + clip_duration_frames) / fps
-                    audio_path = extract_audio_segment(full_audio, source_start, source_end)
-                except Exception as e:
-                    logger.warning("Segment extraction failed for clip %d (%s), using full audio", clip_idx, e)
-                    audio_path = full_audio
-
-            # Detect silences with progress scaled across clips
-            # Detection phase uses 15-90% range, split evenly across clips
-            clip_progress_start = 0.15 + (clip_idx / len(clips)) * 0.75
-            clip_progress_range = 0.75 / len(clips)
-
-            async def progress_cb(pct, msg, _start=clip_progress_start, _range=clip_progress_range):
-                scaled = _start + pct * _range
-                await manager.send_progress("silence", scaled, msg)
-
-            silences = await audio_service.detect_silence_with_progress(
-                audio_path,
-                threshold_db=config.threshold_db,
-                min_duration_ms=effective_min_duration_ms,
-                progress_fn=progress_cb,
+                analysis_audio_fallback_reason = (
+                    str(analysis_audio.get("analysis_audio_fallback_reason") or "master_mix_render_unavailable")
+                )
+                all_silences = await _analyze_silence_per_clip_fallback(
+                    clips,
+                    config=config,
+                    fps=fps,
+                    timeline_start_frame=timeline_start_frame,
+                    effective_min_duration_ms=effective_min_duration_ms,
+                )
+                analysis_audio_source = "per_clip_best_track"
+        else:
+            all_silences = await _analyze_silence_per_clip_fallback(
+                clips,
+                config=config,
+                fps=fps,
+                timeline_start_frame=timeline_start_frame,
+                effective_min_duration_ms=effective_min_duration_ms,
             )
-            profile = audio_service.build_waveform_profile(audio_path)
-            silences = audio_service.refine_silence_segments_to_waveform(
-                audio_path,
-                silences,
-                min_duration_ms=max(20, int(effective_min_duration_ms * 0.25)),
-                profile=profile,
-            )
-
-            quiet_speech_segments = audio_service.detect_low_prominence_speech(
-                audio_path,
-                threshold_db=config.threshold_db,
-                min_duration_ms=max(250, int(effective_min_duration_ms * 0.85)),
-                quiet_delta_db=12.0,
-            )
-            quiet_speech_segments = audio_service.refine_segments_to_low_energy(
-                audio_path,
-                quiet_speech_segments,
-                max_shift_ms=40,
-                min_duration_ms=max(120, int(effective_min_duration_ms * 0.5)),
-                profile=profile,
-            )
-            for segment in quiet_speech_segments:
-                segment["boundary_source"] = "waveform"
-            candidate_segments = [*silences, *quiet_speech_segments]
-
-            # Offset silence timestamps to timeline time
-            for s in candidate_segments:
-                s["start"] += clip_timeline_offset
-                s["end"] += clip_timeline_offset
-                s["start_frame"] = clip_start_frame + int(round((s["start"] - clip_timeline_offset) * fps))
-                s["end_frame"] = clip_start_frame + int(round((s["end"] - clip_timeline_offset) * fps))
-
-            all_silences.extend(candidate_segments)
-
-        merged_segments = _merge_detected_segments([
-            {
-                **s,
-                "start_frame": int(s.get("start_frame", timeline_start_frame + int(round(s["start"] * fps)))),
-                "end_frame": int(s.get("end_frame", timeline_start_frame + int(round(s["end"] * fps)))),
-            }
-            for s in all_silences
-        ])
-        all_silences = []
-        for seg in merged_segments:
-            result_seg = _frame_range_to_segment(
-                seg["start_frame"], seg["end_frame"], timeline_start_frame, fps
-            )
-            if seg.get("kind"):
-                result_seg["kind"] = seg["kind"]
-            if seg.get("boundary_source"):
-                result_seg["boundary_source"] = seg["boundary_source"]
-            all_silences.append(result_seg)
+            analysis_audio_source = "per_clip_best_track"
+            analysis_audio_fallback_reason = "master_mix_disabled"
 
         total_silence = sum(s["duration"] for s in all_silences)
 
@@ -268,6 +342,8 @@ async def analyze_silence(config: SilenceConfig):
             "total_silence_seconds": total_silence,
             "segment_count": len(all_silences),
             "effective_min_duration_ms": effective_min_duration_ms,
+            "analysis_audio_source": analysis_audio_source,
+            "analysis_audio_fallback_reason": analysis_audio_fallback_reason,
         }
     except Exception as e:
         await manager.send_error("silence", str(e))
@@ -316,71 +392,34 @@ async def apply_silence_removal(request: SilenceApplyRequest):
         tl_end = timeline.GetEndFrame()
         total_duration = (tl_end - tl_start) / fps
 
-        await manager.send_progress("silence_apply", 0.3, "Assembling current timeline audio...")
-        assembled_audio, assembled_fps, assembled_tl_start, _assembled_tl_end = assemble_current_timeline_audio()
-        if not assembled_audio or assembled_fps is None or assembled_tl_start is None:
-            return {"error": "Could not assemble current timeline audio"}
-
-        await manager.send_progress("silence_apply", 0.4, "Refining pause boundaries...")
-        profile = audio_service.build_waveform_profile(assembled_audio)
-        silence_candidates: list[dict] = []
-        quiet_candidates: list[dict] = []
-        for silence in selected_silences:
-            segment = {
-                "start": float(silence.start),
-                "end": float(silence.end),
-                "duration": float(silence.duration),
-                "selected": bool(silence.selected),
-                "kind": silence.kind,
-                "start_frame": silence.start_frame,
-                "end_frame": silence.end_frame,
-                "boundary_source": getattr(silence, "boundary_source", None),
-            }
-            if silence.kind == "low_prominence_speech":
-                quiet_candidates.append(segment)
-            else:
-                silence_candidates.append(segment)
-
-        refined_segments = audio_service.refine_silence_segments_to_waveform(
-            assembled_audio,
-            silence_candidates,
-            preserve_padding_ms=request.padding_ms,
-            profile=profile,
+        await manager.send_progress("silence_apply", 0.3, "Rendering precision timeline audio...")
+        refinement = cut_refiner_service.refine_cut_candidates(
+            [
+                {
+                    "start": float(silence.start),
+                    "end": float(silence.end),
+                    "duration": float(silence.duration),
+                    "selected": bool(silence.selected),
+                    "kind": silence.kind,
+                    "start_frame": silence.start_frame,
+                    "end_frame": silence.end_frame,
+                    "boundary_source": getattr(silence, "boundary_source", None),
+                    "padding_ms": request.padding_ms,
+                }
+                for silence in selected_silences
+            ],
+            name_prefix="finlaycut_silence_apply",
+            default_silence_padding_ms=request.padding_ms,
         )
-        refined_quiet = audio_service.refine_segments_to_low_energy(
-            assembled_audio,
-            quiet_candidates,
-            max_shift_ms=40,
-            min_duration_ms=120,
-            profile=profile,
-        )
-        for segment in refined_quiet:
-            segment["boundary_source"] = "waveform"
-        refined_segments.extend(
-            trimmed
-            for trimmed in (_trim_segment_by_padding(segment, request.padding_ms) for segment in refined_quiet)
-            if trimmed is not None
-        )
+        if refinement.get("error"):
+            return {"error": refinement["error"]}
 
-        cut_frame_ranges = []
-        for segment in refined_segments:
-            start_frame = int(assembled_tl_start) + int(round(float(segment["start"]) * assembled_fps))
-            end_frame = int(assembled_tl_start) + int(round(float(segment["end"]) * assembled_fps))
-            start_frame = max(tl_start, min(tl_end, start_frame))
-            end_frame = max(tl_start, min(tl_end, end_frame))
-
-            if end_frame > start_frame:
-                cut_frame_ranges.append((start_frame, end_frame))
+        cut_frame_ranges = list(refinement["cut_frame_ranges"])
+        kept_segments = list(refinement["kept_segments"])
+        applied_cut_segments = list(refinement["applied_cut_segments"])
 
         if not cut_frame_ranges:
             return {"error": "Selected pauses no longer have removable dead air after waveform refinement"}
-
-        cut_frame_ranges = _merge_frame_ranges(cut_frame_ranges)
-        kept_frame_ranges = _subtract_frame_ranges(tl_start, tl_end, cut_frame_ranges)
-        kept_segments = [
-            _frame_range_to_segment(start_frame, end_frame, tl_start, fps)
-            for start_frame, end_frame in kept_frame_ranges
-        ]
 
         if not kept_segments:
             return {"error": "Nothing left to keep after removing all silences"}
@@ -412,6 +451,7 @@ async def apply_silence_removal(request: SilenceApplyRequest):
             "total_removed_seconds": round(total_removed, 1),
             "backup_timeline": backup_name,
             "timeline_name": result.get("timeline_name"),
+            "applied_cut_segments": applied_cut_segments,
             "message": f"Removed {len(cut_frame_ranges)} silence sections ({total_removed:.1f}s) on the current timeline. Backup: {backup_name}"
         }
     except Exception as e:

@@ -3,11 +3,18 @@ import { apiFetch } from '../hooks/useApi'
 
 interface SettingsState {
   aiBackend: 'ollama' | 'claude'
+  visionProvider: 'gemini'
   ollamaModel: string
   claudeModel: string
   whisperModel: string
   claudeApiKey: string
+  geminiApiKey: string
   pexelsApiKey: string
+  visionMaxParallelism: number
+  clipSearchStorageDir: string
+  clipSearchStorageDefaultDir: string
+  clipSearchStorageDbPath: string
+  clipSearchStorageEffectiveDbPath: string
   silenceThresholdDb: number
   silenceMinDurationMs: number
   silenceMinDurationFrames: number
@@ -23,11 +30,18 @@ interface SettingsState {
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   aiBackend: 'ollama',
+  visionProvider: 'gemini',
   ollamaModel: 'llama3',
   claudeModel: 'claude-sonnet-4-5-20250514',
   whisperModel: 'base',
   claudeApiKey: '',
+  geminiApiKey: '',
   pexelsApiKey: '',
+  visionMaxParallelism: 4,
+  clipSearchStorageDir: '',
+  clipSearchStorageDefaultDir: '',
+  clipSearchStorageDbPath: '',
+  clipSearchStorageEffectiveDbPath: '',
   silenceThresholdDb: -40,
   silenceMinDurationMs: 300,
   silenceMinDurationFrames: 14,
@@ -44,9 +58,15 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       const data = await apiFetch('/api/settings/')
       set({
         aiBackend: data.ai_backend,
+        visionProvider: data.vision_provider || 'gemini',
         ollamaModel: data.ollama_model,
         claudeModel: data.claude_model || 'claude-sonnet-4-5-20250514',
         whisperModel: data.whisper_model,
+        visionMaxParallelism: data.vision_max_parallelism || 4,
+        clipSearchStorageDir: data.clip_search_storage_dir || '',
+        clipSearchStorageDefaultDir: data.clip_search_storage_default_dir || '',
+        clipSearchStorageDbPath: data.clip_search_storage_configured_db_path || '',
+        clipSearchStorageEffectiveDbPath: data.clip_search_storage_effective_db_path || data.clip_search_storage_configured_db_path || '',
         silenceThresholdDb: data.silence_threshold_db,
         silenceMinDurationMs: data.silence_min_duration_ms,
         silenceMinDurationFrames: Math.max(14, data.silence_min_duration_frames ?? 14),

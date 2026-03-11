@@ -1,11 +1,13 @@
 """Settings management endpoints."""
 
 import logging
-from fastapi import APIRouter
+from pathlib import Path
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
 from config import settings
 from services.ai_service import ai_service
+from services.clip_search_service import clip_search_service
 
 logger = logging.getLogger("finlaycut.settings")
 router = APIRouter()
@@ -15,6 +17,10 @@ class SettingsUpdate(BaseModel):
     ai_backend: Optional[str] = None
     claude_api_key: Optional[str] = None
     claude_model: Optional[str] = None
+    vision_provider: Optional[str] = None
+    gemini_api_key: Optional[str] = None
+    vision_max_parallelism: Optional[int] = Field(None, ge=1, le=16)
+    clip_search_storage_dir: Optional[str] = None
     ollama_model: Optional[str] = None
     whisper_model: Optional[str] = None
     silence_threshold_db: Optional[int] = Field(None, ge=-80, le=0)
@@ -38,6 +44,15 @@ async def get_settings():
         "ollama_model": settings.ollama_model,
         "claude_model": settings.claude_model,
         "has_claude_key": bool(settings.claude_api_key),
+        "vision_provider": settings.vision_provider,
+        "has_gemini_key": bool(settings.gemini_api_key),
+        "vision_max_parallelism": settings.vision_max_parallelism,
+        "clip_search_storage_dir": settings.clip_search_storage_dir,
+        "clip_search_storage_default_dir": str(settings.app_data_dir),
+        **{
+            f"clip_search_storage_{key}": value
+            for key, value in clip_search_service.get_storage_info().items()
+        },
         "whisper_model": settings.whisper_model,
         "silence_threshold_db": settings.silence_threshold_db,
         "silence_min_duration_ms": settings.silence_min_duration_ms,
@@ -53,6 +68,8 @@ async def get_settings():
 @router.put("/")
 async def update_settings(update: SettingsUpdate):
     """Update settings."""
+    previous_clip_search_db_path = clip_search_service.get_storage_info()["effective_db_path"]
+
     if update.ai_backend is not None:
         settings.ai_backend = update.ai_backend
         ai_service.set_backend(update.ai_backend)
@@ -62,6 +79,35 @@ async def update_settings(update: SettingsUpdate):
 
     if update.claude_model is not None:
         settings.claude_model = update.claude_model
+
+    if update.vision_provider is not None:
+        settings.vision_provider = update.vision_provider
+
+    if update.gemini_api_key is not None:
+        settings.gemini_api_key = update.gemini_api_key if update.gemini_api_key else None
+
+    if update.vision_max_parallelism is not None:
+        settings.vision_max_parallelism = int(update.vision_max_parallelism)
+
+    clip_search_storage_update = None
+    if update.clip_search_storage_dir is not None:
+        normalized = str(update.clip_search_storage_dir or "").strip()
+        if normalized:
+            try:
+                storage_dir = Path(normalized).expanduser().resolve()
+                storage_dir.mkdir(parents=True, exist_ok=True)
+                probe_path = storage_dir / ".finlaycut_clip_search_probe"
+                probe_path.write_text("ok", encoding="utf-8")
+                probe_path.unlink(missing_ok=True)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Clip Search storage folder is not writable: {exc}",
+                ) from exc
+            settings.clip_search_storage_dir = str(storage_dir)
+        else:
+            settings.clip_search_storage_dir = None
+        clip_search_storage_update = clip_search_service.refresh_storage_location(previous_clip_search_db_path)
 
     if update.ollama_model is not None:
         settings.ollama_model = update.ollama_model
@@ -96,7 +142,17 @@ async def update_settings(update: SettingsUpdate):
     settings.save_to_disk()
     logger.info("Settings updated and saved to disk")
 
-    return {"success": True, "message": "Settings updated"}
+    response = {"success": True, "message": "Settings updated"}
+    if clip_search_storage_update is not None:
+        response.update(
+            {
+                "clip_search_storage_dir": settings.clip_search_storage_dir,
+                "clip_search_storage_db_path": clip_search_storage_update["configured_db_path"],
+                "clip_search_storage_effective_db_path": clip_search_storage_update["effective_db_path"],
+                "clip_search_storage_migrated": clip_search_storage_update["migrated"],
+            }
+        )
+    return response
 
 
 @router.post("/clear-cache")

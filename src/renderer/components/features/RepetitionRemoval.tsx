@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { Button } from '../common/Button'
 import { ConfirmApply } from '../common/TimelineGuard'
@@ -39,6 +39,40 @@ interface RepetitionGroup {
   match_length?: number
 }
 
+interface DuplicateClipInstance {
+  clip_name: string
+  track_index: number
+  timeline_item_unique_id?: string | null
+  timeline_start_frame: number
+  timeline_end_frame: number
+  timeline_start_seconds: number
+  timeline_end_seconds: number
+  source_start_frame: number
+  source_end_frame: number
+}
+
+interface DuplicateClipGroup {
+  source_key: string
+  source_label: string
+  source_start_frame: number
+  source_end_frame: number
+  instance_count: number
+  instances: DuplicateClipInstance[]
+}
+
+interface DuplicateClipScanResult {
+  success?: boolean
+  error?: string
+  warning?: string
+  message?: string
+  duplicate_group_count?: number
+  duplicate_instance_count?: number
+  timeline_marker_count?: number
+  clip_marker_count?: number
+  cleared_count?: number
+  skipped_untrackable_count?: number
+}
+
 function scoreColor(score: number): string {
   if (score >= 0.7) return 'text-resolve-success'
   if (score >= 0.4) return 'text-yellow-400'
@@ -55,6 +89,8 @@ export function RepetitionRemoval() {
   const {
     repetitionGroups: storedGroups,
     setRepetitionGroups: storeGroups,
+    duplicateClipGroups: storedDuplicateGroups,
+    setDuplicateClipGroups: storeDuplicateGroups,
     transcriptWords,
   } = useFeatureDataStore()
 
@@ -62,35 +98,42 @@ export function RepetitionRemoval() {
   const isRunning = op?.status === 'running'
 
   const [groups, setGroups] = useState<RepetitionGroup[]>(storedGroups as RepetitionGroup[])
+  const [duplicateGroups, setDuplicateGroups] = useState<DuplicateClipGroup[]>(
+    storedDuplicateGroups as DuplicateClipGroup[]
+  )
   const [applying, setApplying] = useState(false)
-  const [result, setResult] = useState<any>(null)
+  const [duplicateScanning, setDuplicateScanning] = useState(false)
+  const [retakeResult, setRetakeResult] = useState<any>(null)
+  const [duplicateResult, setDuplicateResult] = useState<DuplicateClipScanResult | null>(null)
   const [undoEntryId, setUndoEntryId] = useState<string | null>(null)
   const [showUndoConfirm, setShowUndoConfirm] = useState(false)
   const [undoing, setUndoing] = useState(false)
   const { progress, message, elapsed, eta } = useProgress(OP_NAME)
+  const previousGroupsRef = useRef<RepetitionGroup[]>([])
 
-  // Persist across tab switches
   useEffect(() => {
     storeGroups(groups)
   }, [groups, storeGroups])
 
-  // Pickup: if operation completed while unmounted
+  useEffect(() => {
+    storeDuplicateGroups(duplicateGroups)
+  }, [duplicateGroups, storeDuplicateGroups])
+
   useEffect(() => {
     if (op?.status === 'complete' && op.result) {
       if (op.result.groups) setGroups(op.result.groups)
       useOperationStore.getState().clearResult(OP_NAME)
     }
     if (op?.status === 'error' && op.error) {
-      setResult({ error: op.error })
+      setRetakeResult({ error: op.error })
     }
   }, [op?.status, op?.result, op?.error])
 
   const handleDetect = async () => {
     useOperationStore.getState().startOperation(OP_NAME)
     setGroups([])
-    setResult(null)
+    setRetakeResult(null)
     try {
-      // If transcript words exist, pass them to skip re-transcription
       const spokenWords = transcriptWords.filter((w) => !isAnalysisMarker(w))
       const body: Record<string, any> = {}
       if (spokenWords.length > 0) {
@@ -114,7 +157,7 @@ export function RepetitionRemoval() {
       })
       if (data.error) {
         useOperationStore.getState().failOperation(OP_NAME, data.error)
-        setResult({ error: data.error })
+        setRetakeResult({ error: data.error })
         toast.error(data.error)
       } else {
         useFeatureDataStore.getState().setRepetitionGroups(data.groups || [])
@@ -123,7 +166,7 @@ export function RepetitionRemoval() {
       }
     } catch (err: any) {
       useOperationStore.getState().failOperation(OP_NAME, err.message)
-      setResult({ error: err.message })
+      setRetakeResult({ error: err.message })
       toast.error(err.message)
     }
   }
@@ -144,20 +187,55 @@ export function RepetitionRemoval() {
         method: 'POST',
         body: JSON.stringify(groups)
       })
-      setResult(data)
+      setRetakeResult(data)
       if (data.success) {
         toast.success(data.message || 'Best takes applied')
         setUndoEntryId(data.undo_entry_id || null)
         setGroups([])
         useFeatureDataStore.getState().setRepetitionGroups([])
         previousGroupsRef.current = previousGroups
+      } else if (data.error) {
+        toast.error(data.error)
       }
-      else if (data.error) toast.error(data.error)
     } catch (err: any) {
-      setResult({ error: err.message })
+      setRetakeResult({ error: err.message })
       toast.error(err.message)
     } finally {
       setApplying(false)
+    }
+  }
+
+  const handleScanDuplicateClips = async () => {
+    setDuplicateScanning(true)
+    setDuplicateResult(null)
+    try {
+      const data = await apiFetch('/api/repetition/duplicate-clips/scan', {
+        method: 'POST',
+      })
+      if (data.error) {
+        setDuplicateResult({ error: data.error })
+        toast.error(data.error)
+        return
+      }
+
+      const nextGroups = (data.groups || []) as DuplicateClipGroup[]
+      setDuplicateGroups(nextGroups)
+      useFeatureDataStore.getState().setDuplicateClipGroups(nextGroups)
+      setDuplicateResult(data)
+
+      if (data.warning) {
+        toast.info(data.warning)
+      }
+      if (data.duplicate_group_count > 0) {
+        toast.success(data.message || 'Duplicate clips flagged')
+      } else {
+        toast.info(data.message || 'No duplicate clips detected')
+      }
+    } catch (err: any) {
+      setDuplicateResult({ error: err.message })
+      toast.error(err.message)
+    } finally {
+      setDuplicateScanning(false)
     }
   }
 
@@ -172,8 +250,6 @@ export function RepetitionRemoval() {
     }
   }
 
-  const previousGroupsRef = React.useRef<RepetitionGroup[]>([])
-
   const handleUndo = async () => {
     if (!undoEntryId) return
     setUndoing(true)
@@ -181,7 +257,7 @@ export function RepetitionRemoval() {
       const data = await apiFetch(`/api/undo/rollback/${undoEntryId}`, { method: 'POST' })
       if (data.success) {
         toast.success(data.message || 'Rolled back successfully')
-        setResult(null)
+        setRetakeResult(null)
         setUndoEntryId(null)
         setGroups(previousGroupsRef.current)
         useFeatureDataStore.getState().setRepetitionGroups(previousGroupsRef.current)
@@ -199,127 +275,217 @@ export function RepetitionRemoval() {
   return (
     <div className="feature-panel">
       <div>
-        <h2 className="feature-title">Take/Repetition Removal</h2>
+        <h2 className="feature-title">Takes & Duplicates</h2>
         <p className="feature-description">
-          Detects when someone re-does a line. Scores each take for quality and
-          recommends the best one. You choose which take to keep.
+          Review retakes to remove and scan the current timeline for exact duplicate clip usage.
+          Duplicate scans add review markers to every matching instance.
         </p>
       </div>
 
-      {isRunning ? (
-        <Button disabled size="lg" variant="ghost">
-          Detecting...
-        </Button>
-      ) : (
-        <Button onClick={handleDetect} size="lg">
-          Detect Repetitions
-        </Button>
-      )}
-
-      {isRunning && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
-
-      {groups.length > 0 && (
-        <div className="space-y-3">
-          {groups.map((group, gi) => (
-            <Card key={gi}>
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <h4 className="text-sm font-semibold text-resolve-text">
-                    Repeated Section ({group.count} takes)
-                  </h4>
-                  {group.matched_text && (
-                    <span className="text-xs text-resolve-textMuted italic truncate ml-2 max-w-[200px]">
-                      "{group.matched_text}"
-                    </span>
-                  )}
-                </div>
-                {group.takes.map((take, ti) => {
-                  const isRecommended = group.best_index === ti
-                  const pct = Math.round((take.scores?.combined ?? 0) * 100)
-                  return (
-                    <button
-                      key={ti}
-                      onClick={() => {
-                        selectBest(gi, ti)
-                        handleJumpToTake(take.start)
-                      }}
-                      className={`w-full text-left p-3 rounded-lg text-sm transition-colors ${
-                        isRecommended
-                          ? 'bg-resolve-success/10 border border-resolve-success/30'
-                          : 'bg-resolve-bg hover:bg-resolve-surfaceLight'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-xs text-resolve-textMuted">
-                          Take {ti + 1} - {formatTime(take.start)}
-                        </span>
-                        <div className="flex items-center gap-2">
-                          {take.scores && (
-                            <span className={`text-xs font-mono px-1.5 py-0.5 rounded border ${scoreBadgeBg(take.scores.combined)} ${scoreColor(take.scores.combined)}`}>
-                              {pct}%
-                            </span>
-                          )}
-                          {isRecommended && (
-                            <span className="text-xs text-resolve-success font-medium">Recommended</span>
-                          )}
-                        </div>
-                      </div>
-                      <TakeText text={take.text} matchedText={group.matched_text} />
-                      {take.scores && (
-                        <div className="flex gap-3 mt-1.5">
-                          <span className="text-xs text-resolve-textMuted">
-                            Completeness <span className={scoreColor(take.scores.completion)}>{Math.round(take.scores.completion * 100)}%</span>
-                          </span>
-                          <span className="text-xs text-resolve-textMuted">
-                            Clarity <span className={scoreColor(take.scores.confidence)}>{Math.round(take.scores.confidence * 100)}%</span>
-                          </span>
-                          <span className="text-xs text-resolve-textMuted">
-                            Fluency <span className={scoreColor(take.scores.fluency)}>{Math.round(take.scores.fluency * 100)}%</span>
-                          </span>
-                        </div>
-                      )}
-                    </button>
-                  )
-                })}
-              </div>
-            </Card>
-          ))}
-
-          <ConfirmApply onConfirm={handleApply} loading={applying} size="lg">
-            Keep Best Takes
-          </ConfirmApply>
-        </div>
-      )}
-
-      {groups.length === 0 && !isRunning && result && !result.error && (
-        <Card>
-          <p className="text-sm text-resolve-textDim">No repetitions detected.</p>
-        </Card>
-      )}
-
-      {result?.error && (
-        <Card className="border-resolve-error/30">
-          <p className="text-sm text-resolve-error">{result.error}</p>
-        </Card>
-      )}
-
-      {result?.success && (
-        <Card className="border-resolve-success/30">
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-sm text-resolve-success">{result.message}</p>
-            {undoEntryId && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setShowUndoConfirm(true)}
-                disabled={undoing}
-              >
-                Undo
-              </Button>
-            )}
+      <Card>
+        <div className="space-y-4">
+          <div>
+            <h3 className="text-sm font-semibold text-resolve-text">Retake Detection</h3>
+            <p className="text-sm text-resolve-textDim mt-1">
+              Detects when someone re-does a line, scores each take, and recommends the best version to keep.
+            </p>
           </div>
-        </Card>
-      )}
+
+          {isRunning ? (
+            <Button disabled size="lg" variant="ghost">
+              Detecting...
+            </Button>
+          ) : (
+            <Button onClick={handleDetect} size="lg">
+              Detect Repetitions
+            </Button>
+          )}
+
+          {isRunning && <ProgressBar progress={progress} message={message} elapsed={elapsed} eta={eta} />}
+
+          {groups.length > 0 && (
+            <div className="space-y-3">
+              {groups.map((group, gi) => (
+                <div key={gi} className="rounded-xl border border-resolve-border bg-resolve-bg p-4">
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-sm font-semibold text-resolve-text">
+                        Repeated Section ({group.count} takes)
+                      </h4>
+                      {group.matched_text && (
+                        <span className="text-xs text-resolve-textMuted italic truncate ml-2 max-w-[220px]">
+                          "{group.matched_text}"
+                        </span>
+                      )}
+                    </div>
+                    {group.takes.map((take, ti) => {
+                      const isRecommended = group.best_index === ti
+                      const pct = Math.round((take.scores?.combined ?? 0) * 100)
+                      return (
+                        <button
+                          key={ti}
+                          onClick={() => {
+                            selectBest(gi, ti)
+                            handleJumpToTake(take.start)
+                          }}
+                          className={`w-full text-left p-3 rounded-lg text-sm transition-colors ${
+                            isRecommended
+                              ? 'bg-resolve-success/10 border border-resolve-success/30'
+                              : 'bg-resolve-surface hover:bg-resolve-surfaceLight'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-xs text-resolve-textMuted">
+                              Take {ti + 1} - {formatTime(take.start)}
+                            </span>
+                            <div className="flex items-center gap-2">
+                              {take.scores && (
+                                <span className={`text-xs font-mono px-1.5 py-0.5 rounded border ${scoreBadgeBg(take.scores.combined)} ${scoreColor(take.scores.combined)}`}>
+                                  {pct}%
+                                </span>
+                              )}
+                              {isRecommended && (
+                                <span className="text-xs text-resolve-success font-medium">Recommended</span>
+                              )}
+                            </div>
+                          </div>
+                          <TakeText text={take.text} matchedText={group.matched_text} />
+                          {take.scores && (
+                            <div className="flex gap-3 mt-1.5">
+                              <span className="text-xs text-resolve-textMuted">
+                                Completeness <span className={scoreColor(take.scores.completion)}>{Math.round(take.scores.completion * 100)}%</span>
+                              </span>
+                              <span className="text-xs text-resolve-textMuted">
+                                Clarity <span className={scoreColor(take.scores.confidence)}>{Math.round(take.scores.confidence * 100)}%</span>
+                              </span>
+                              <span className="text-xs text-resolve-textMuted">
+                                Fluency <span className={scoreColor(take.scores.fluency)}>{Math.round(take.scores.fluency * 100)}%</span>
+                              </span>
+                            </div>
+                          )}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              ))}
+
+              <ConfirmApply onConfirm={handleApply} loading={applying} size="lg">
+                Keep Best Takes
+              </ConfirmApply>
+            </div>
+          )}
+
+          {groups.length === 0 && !isRunning && retakeResult && !retakeResult.error && (
+            <div className="rounded-lg bg-resolve-bg p-4">
+              <p className="text-sm text-resolve-textDim">No repetitions detected.</p>
+            </div>
+          )}
+
+          {retakeResult?.error && (
+            <div className="rounded-lg border border-resolve-error/30 bg-resolve-error/5 p-4">
+              <p className="text-sm text-resolve-error">{retakeResult.error}</p>
+            </div>
+          )}
+
+          {retakeResult?.success && (
+            <div className="rounded-lg border border-resolve-success/30 bg-resolve-success/5 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm text-resolve-success">{retakeResult.message}</p>
+                {undoEntryId && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setShowUndoConfirm(true)}
+                    disabled={undoing}
+                  >
+                    Undo
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </Card>
+
+      <Card>
+        <div className="space-y-4">
+          <div>
+            <h3 className="text-sm font-semibold text-resolve-text">Duplicate Clip Detection</h3>
+            <p className="text-sm text-resolve-textDim mt-1">
+              Scans video clips for exact duplicate source spans and flags every matching instance with review markers.
+            </p>
+          </div>
+
+          <Button onClick={handleScanDuplicateClips} size="lg" loading={duplicateScanning}>
+            {duplicateScanning ? 'Scanning Timeline...' : 'Scan Timeline for Duplicate Clips'}
+          </Button>
+
+          {duplicateResult?.message && !duplicateResult.error && (
+            <div className="rounded-lg border border-resolve-accent/30 bg-resolve-accent/5 p-4 space-y-2">
+              <p className="text-sm text-resolve-text">{duplicateResult.message}</p>
+              <p className="text-xs text-resolve-textMuted">{buildDuplicateSummary(duplicateResult)}</p>
+            </div>
+          )}
+
+          {duplicateResult?.warning && (
+            <div className="rounded-lg border border-yellow-400/30 bg-yellow-400/10 p-4">
+              <p className="text-sm text-yellow-300">{duplicateResult.warning}</p>
+            </div>
+          )}
+
+          {duplicateResult?.error && (
+            <div className="rounded-lg border border-resolve-error/30 bg-resolve-error/5 p-4">
+              <p className="text-sm text-resolve-error">{duplicateResult.error}</p>
+            </div>
+          )}
+
+          {duplicateGroups.length > 0 && (
+            <div className="space-y-3">
+              {duplicateGroups.map((group) => (
+                <div
+                  key={`${group.source_key}-${group.source_start_frame}-${group.source_end_frame}`}
+                  className="rounded-xl border border-resolve-border bg-resolve-bg p-4"
+                >
+                  <div className="flex items-start justify-between gap-3 mb-3">
+                    <div>
+                      <h4 className="text-sm font-semibold text-resolve-text">
+                        Duplicate Source Span ({group.instance_count} instances)
+                      </h4>
+                      <p className="text-xs text-resolve-textMuted mt-1">{group.source_label}</p>
+                    </div>
+                    <span className="text-xs font-mono text-resolve-textMuted">
+                      Source {group.source_start_frame}-{group.source_end_frame}
+                    </span>
+                  </div>
+
+                  <div className="space-y-2">
+                    {group.instances.map((instance) => (
+                      <button
+                        key={`${instance.timeline_item_unique_id || instance.timeline_start_frame}-${instance.track_index}`}
+                        onClick={() => handleJumpToTake(instance.timeline_start_seconds)}
+                        className="w-full rounded-lg border border-transparent bg-resolve-surface p-3 text-left transition-colors hover:border-resolve-border hover:bg-resolve-surfaceLight"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-sm font-medium text-resolve-text">{instance.clip_name}</span>
+                          <span className="text-xs text-resolve-textMuted">
+                            V{instance.track_index} · {formatTime(instance.timeline_start_seconds, 'tenths')} - {formatTime(instance.timeline_end_seconds, 'tenths')}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-xs text-resolve-textMuted">
+                          Timeline {instance.timeline_start_frame}-{instance.timeline_end_frame}
+                          {' · '}
+                          Source {instance.source_start_frame}-{instance.source_end_frame}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </Card>
 
       <Modal open={showUndoConfirm} onClose={() => setShowUndoConfirm(false)} title="Undo Repetition Removal">
         <p className="text-sm text-resolve-textDim mb-4">
@@ -338,7 +504,6 @@ export function RepetitionRemoval() {
   )
 }
 
-/** Renders take text with matched portion dimmed and continuation bright. */
 function TakeText({ text, matchedText }: { text: string; matchedText?: string }) {
   if (!matchedText) {
     return <p className="text-resolve-text">{text}</p>
@@ -389,8 +554,27 @@ function findTokenSubsequence(textTokens: string[], matchTokens: string[]): numb
   return -1
 }
 
-function formatTime(seconds: number): string {
+function buildDuplicateSummary(result: DuplicateClipScanResult): string {
+  const parts = [
+    `${result.duplicate_group_count || 0} group${result.duplicate_group_count === 1 ? '' : 's'}`,
+    `${result.duplicate_instance_count || 0} instance${result.duplicate_instance_count === 1 ? '' : 's'}`,
+    `${result.timeline_marker_count || 0} timeline marker${result.timeline_marker_count === 1 ? '' : 's'}`,
+    `${result.clip_marker_count || 0} clip marker${result.clip_marker_count === 1 ? '' : 's'}`,
+  ]
+  if (result.skipped_untrackable_count) {
+    parts.push(`${result.skipped_untrackable_count} skipped`)
+  }
+  if (result.cleared_count) {
+    parts.push(`${result.cleared_count} cleared`)
+  }
+  return parts.join(' · ')
+}
+
+function formatTime(seconds: number, precision: 'seconds' | 'tenths' = 'seconds'): string {
   const m = Math.floor(seconds / 60)
-  const s = Math.floor(seconds % 60)
-  return `${m}:${s.toString().padStart(2, '0')}`
+  const s = seconds - m * 60
+  if (precision === 'tenths') {
+    return `${m}:${s.toFixed(1).padStart(4, '0')}`
+  }
+  return `${m}:${Math.floor(s).toString().padStart(2, '0')}`
 }

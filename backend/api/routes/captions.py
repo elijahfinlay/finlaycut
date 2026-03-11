@@ -16,6 +16,79 @@ logger = logging.getLogger("finlaycut.captions")
 router = APIRouter()
 
 
+async def apply_srt_to_timeline(
+    *,
+    operation_name: str,
+    srt_content: str,
+    entry_count: int,
+    undo_label: str,
+    undo_description: str,
+    srt_filename: str = "captions.srt",
+    ensure_new_track: bool = False,
+) -> dict:
+    """Save SRT content to disk and import it into the current timeline."""
+    if not resolve_service.connected:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    await manager.send_progress(operation_name, 0.1, "Creating backup...")
+
+    backup = resolve_service.duplicate_timeline()
+    backup_name = "none"
+    if backup is not None:
+        try:
+            backup_name = backup.GetName()
+        except Exception:
+            backup_name = "backup"
+    else:
+        logger.warning("Could not create backup timeline")
+
+    timeline = resolve_service.get_current_timeline()
+    if timeline is None:
+        return {"error": "No active timeline"}
+
+    try:
+        sub_tracks = int(timeline.GetTrackCount("subtitle") or 0)
+        if sub_tracks == 0 or ensure_new_track:
+            timeline.AddTrack("subtitle")
+
+        await manager.send_progress(operation_name, 0.3, "Saving SRT file...")
+
+        import os
+
+        srt_path = os.path.join(str(settings.temp_dir), srt_filename)
+        with open(srt_path, "w", encoding="utf-8") as handle:
+            handle.write(srt_content or "")
+
+        await manager.send_progress(operation_name, 0.6, "Importing subtitles...")
+
+        if os.path.exists(srt_path):
+            timeline.ImportIntoTimeline(
+                srt_path,
+                {"autoImportSourceClipsIntoMediaPool": True},
+            )
+
+        await manager.send_progress(operation_name, 1.0, "Done")
+        await manager.send_complete(
+            operation_name,
+            {"caption_count": entry_count, "backup_name": backup_name},
+        )
+
+        from api.routes.undo import _record
+
+        _record(undo_label, backup_name, undo_description)
+
+        return {
+            "success": True,
+            "caption_count": entry_count,
+            "srt_path": srt_path,
+            "backup_timeline": backup_name,
+            "message": f"Applied {entry_count} subtitle entries. SRT saved to {srt_path}. Backup: {backup_name}",
+        }
+    except Exception as e:
+        await manager.send_error(operation_name, str(e))
+        return {"error": str(e)}
+
+
 @router.post("/generate")
 @heavy_operation("Caption Generation")
 async def generate_captions(request: CaptionGenerateRequest):
@@ -99,71 +172,15 @@ async def generate_captions(request: CaptionGenerateRequest):
 @router.post("/apply")
 async def apply_captions(request: CaptionApplyRequest):
     """Apply captions to the current timeline."""
-    if not resolve_service.connected:
-        return {"error": "Not connected to DaVinci Resolve"}
-
-    await manager.send_progress("captions_apply", 0.1, "Creating backup...")
-
-    # Create backup (non-blocking — proceed even if backup fails)
-    backup = resolve_service.duplicate_timeline()
-    backup_name = "none"
-    if backup is not None:
-        try:
-            backup_name = backup.GetName()
-        except Exception:
-            backup_name = "backup"
-    else:
-        logger.warning("Could not create backup timeline")
-
-    timeline = resolve_service.get_current_timeline()
-    if timeline is None:
-        return {"error": "No active timeline"}
-
-    try:
-        # Add subtitle track if needed
-        sub_tracks = timeline.GetTrackCount("subtitle")
-        if sub_tracks == 0:
-            timeline.AddTrack("subtitle")
-
-        await manager.send_progress("captions_apply", 0.3, "Saving SRT file...")
-
-        # Save SRT to disk so the user can import it
-        import os
-        srt_path = os.path.join(str(settings.temp_dir), "captions.srt")
-        if request.srt:
-            with open(srt_path, "w", encoding="utf-8") as f:
-                f.write(request.srt)
-
-        await manager.send_progress("captions_apply", 0.6, "Importing subtitles...")
-
-        # Try to import the SRT into the timeline
-        # Resolve's ImportIntoTimeline can handle SRT files
-        if os.path.exists(srt_path):
-            timeline.ImportIntoTimeline(srt_path, {
-                "autoImportSourceClipsIntoMediaPool": True
-            })
-
-        await manager.send_progress("captions_apply", 1.0, "Done")
-
-        await manager.send_complete("captions_apply", {
-            "caption_count": len(request.captions),
-            "backup_name": backup_name
-        })
-
-        from api.routes.undo import _record
-        _record("Captions", backup_name,
-                f"Applied {len(request.captions)} captions")
-
-        return {
-            "success": True,
-            "caption_count": len(request.captions),
-            "srt_path": srt_path,
-            "backup_timeline": backup_name,
-            "message": f"Applied {len(request.captions)} captions. SRT saved to {srt_path}. Backup: {backup_name}"
-        }
-    except Exception as e:
-        await manager.send_error("captions_apply", str(e))
-        return {"error": str(e)}
+    return await apply_srt_to_timeline(
+        operation_name="captions_apply",
+        srt_content=request.srt or "",
+        entry_count=len(request.captions),
+        undo_label="Captions",
+        undo_description=f"Applied {len(request.captions)} captions",
+        srt_filename="captions.srt",
+        ensure_new_track=False,
+    )
 
 
 @router.get("/export-srt")

@@ -9,7 +9,9 @@ from services.diarization_service import diarization_service
 from utils.audio_utils import extract_audio, extract_audio_segment, assemble_timeline_audio
 from utils.operation_queue import heavy_operation
 from utils.speaker_analysis import build_speaker_summaries, compute_speaker_loudness
+from utils.timeline_audio import prepare_timeline_analysis_audio
 from api.websocket import manager
+from config import settings
 
 logger = logging.getLogger("finlaycut.diarization_route")
 router = APIRouter()
@@ -32,19 +34,40 @@ async def analyze_speakers(
     if not resolve_service.connected:
         return {"error": "Not connected to DaVinci Resolve"}
 
-    clip = resolve_service.get_clip_at_playhead("audio", 1)
-    if clip is None:
-        clip = resolve_service.get_clip_at_playhead("video", 1)
-    if clip is None:
-        return {"error": "No clips found at playhead"}
-
-    file_path = resolve_service.get_clip_file_path(clip)
-    if not file_path:
-        return {"error": "Could not determine source file path"}
-
     try:
-        await manager.send_progress("diarization", 0.05, "Extracting audio...")
-        audio_path = extract_audio(file_path)
+        analysis_audio_source: str | None = None
+        analysis_audio_fallback_reason: str | None = None
+        if bool(getattr(settings, "enable_master_mix_analysis_default", True)):
+            await manager.send_progress("diarization", 0.05, "Preparing timeline audio...")
+            analysis_audio = prepare_timeline_analysis_audio(
+                name_prefix="finlaycut_diarization",
+                fallback_restore_page="edit",
+                allow_track_fallback=True,
+                reuse_cached_master_mix=True,
+            )
+            audio_path = analysis_audio.get("audio_path")
+            if not audio_path:
+                return {"error": "Could not extract timeline audio for speaker analysis"}
+            analysis_audio_source = str(analysis_audio.get("analysis_audio_source") or "rendered_master_mix")
+            analysis_audio_fallback_reason = (
+                str(analysis_audio.get("analysis_audio_fallback_reason"))
+                if analysis_audio.get("analysis_audio_fallback_reason") is not None
+                else None
+            )
+        else:
+            clip = resolve_service.get_clip_at_playhead("audio", 1)
+            if clip is None:
+                clip = resolve_service.get_clip_at_playhead("video", 1)
+            if clip is None:
+                return {"error": "No clips found at playhead"}
+
+            file_path = resolve_service.get_clip_file_path(clip)
+            if not file_path:
+                return {"error": "Could not determine source file path"}
+            await manager.send_progress("diarization", 0.05, "Extracting audio...")
+            audio_path = extract_audio(file_path)
+            analysis_audio_source = "per_clip_best_track"
+            analysis_audio_fallback_reason = "master_mix_disabled"
 
         async def progress_fn(pct, msg):
             await manager.send_progress("diarization", pct, msg)
@@ -64,6 +87,8 @@ async def analyze_speakers(
             "segment_count": len(segments),
             "method": method,
             "fallback_reason": fallback_reason,
+            "analysis_audio_source": analysis_audio_source,
+            "analysis_audio_fallback_reason": analysis_audio_fallback_reason,
         }
     except ImportError as e:
         return {"error": str(e)}
@@ -103,45 +128,68 @@ async def annotate_transcript_speakers(request: TranscriptSpeakerRequest):
 
     try:
         await manager.send_progress("diarization", 0.04, "Extracting timeline audio...")
-        if not clip_contexts:
-            logger.warning("Speaker analysis found no usable clip sources: %s", clip_selection["attempts"])
-            assembled_audio = resolve_service.render_current_timeline_audio(
-                "finlaycut_diarization",
+        analysis_audio_source: str | None = None
+        analysis_audio_fallback_reason: str | None = None
+        if bool(getattr(settings, "enable_master_mix_analysis_default", True)):
+            analysis_audio = prepare_timeline_analysis_audio(
+                name_prefix="finlaycut_diarization",
                 fallback_restore_page="edit",
+                allow_track_fallback=True,
+                reuse_cached_master_mix=True,
             )
+            assembled_audio = analysis_audio.get("audio_path")
             if not assembled_audio:
                 return {"error": "Could not extract timeline audio for speaker analysis"}
+            analysis_audio_source = str(analysis_audio.get("analysis_audio_source") or "rendered_master_mix")
+            analysis_audio_fallback_reason = (
+                str(analysis_audio.get("analysis_audio_fallback_reason"))
+                if analysis_audio.get("analysis_audio_fallback_reason") is not None
+                else None
+            )
         else:
-            audio_cache: dict[str, str] = {}
-            clip_segments: list[dict] = []
+            if not clip_contexts:
+                logger.warning("Speaker analysis found no usable clip sources: %s", clip_selection["attempts"])
+                assembled_audio = resolve_service.render_current_timeline_audio(
+                    "finlaycut_diarization",
+                    fallback_restore_page="edit",
+                )
+                if not assembled_audio:
+                    return {"error": "Could not extract timeline audio for speaker analysis"}
+                analysis_audio_source = "rendered_master_mix"
+                analysis_audio_fallback_reason = None
+            else:
+                audio_cache: dict[str, str] = {}
+                clip_segments: list[dict] = []
 
-            for index, clip_context in enumerate(clip_contexts):
-                file_path = str(clip_context["file_path"])
-                if file_path not in audio_cache:
-                    audio_cache[file_path] = extract_audio(file_path)
-                full_audio = audio_cache[file_path]
+                for index, clip_context in enumerate(clip_contexts):
+                    file_path = str(clip_context["file_path"])
+                    if file_path not in audio_cache:
+                        audio_cache[file_path] = extract_audio(file_path)
+                    full_audio = audio_cache[file_path]
 
-                audio_path = full_audio
-                if clip_context.get("source_start_seconds") is not None and clip_context.get("source_end_seconds") is not None:
-                    try:
-                        audio_path = extract_audio_segment(
-                            full_audio,
-                            float(clip_context["source_start_seconds"]),
-                            float(clip_context["source_end_seconds"]),
-                        )
-                    except Exception as e:
-                        logger.warning("Speaker segment extraction failed for clip %d (%s)", index, e)
+                    audio_path = full_audio
+                    if clip_context.get("source_start_seconds") is not None and clip_context.get("source_end_seconds") is not None:
+                        try:
+                            audio_path = extract_audio_segment(
+                                full_audio,
+                                float(clip_context["source_start_seconds"]),
+                                float(clip_context["source_end_seconds"]),
+                            )
+                        except Exception as e:
+                            logger.warning("Speaker segment extraction failed for clip %d (%s)", index, e)
 
-                clip_segments.append({
-                    "audio_path": audio_path,
-                    "timeline_start_seconds": float(clip_context["clip_timeline_offset"]),
-                    "duration_seconds": float(clip_context["clip_duration_seconds"]),
-                })
+                    clip_segments.append({
+                        "audio_path": audio_path,
+                        "timeline_start_seconds": float(clip_context["clip_timeline_offset"]),
+                        "duration_seconds": float(clip_context["clip_duration_seconds"]),
+                    })
 
-            if not clip_segments:
-                return {"error": "Could not extract timeline audio for speaker analysis"}
+                if not clip_segments:
+                    return {"error": "Could not extract timeline audio for speaker analysis"}
 
-            assembled_audio = assemble_timeline_audio(clip_segments, timeline_duration_seconds)
+                assembled_audio = assemble_timeline_audio(clip_segments, timeline_duration_seconds)
+                analysis_audio_source = "assembled_best_track"
+                analysis_audio_fallback_reason = "master_mix_disabled"
 
         async def progress_fn(pct, msg):
             scaled = 0.10 + pct * 0.78
@@ -168,6 +216,8 @@ async def annotate_transcript_speakers(request: TranscriptSpeakerRequest):
             "speaker_count": len(speakers),
             "method": method,
             "fallback_reason": fallback_reason,
+            "analysis_audio_source": analysis_audio_source,
+            "analysis_audio_fallback_reason": analysis_audio_fallback_reason,
         }
     except ImportError as e:
         return {"error": str(e)}

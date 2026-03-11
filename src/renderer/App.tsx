@@ -3,7 +3,7 @@ import { Sidebar } from './components/layout/Sidebar'
 import { Header } from './components/layout/Header'
 import { TranscriptEditor } from './components/features/TranscriptEditor'
 import { SilenceRemoval } from './components/features/SilenceRemoval'
-// FillerWordRemoval is now integrated into TranscriptEditor ("Find Fillers" button)
+import { FillerWordRemoval } from './components/features/FillerWordRemoval'
 import { CaptionGenerator } from './components/features/CaptionGenerator'
 import { DynamicZoom } from './components/features/DynamicZoom'
 import { ChapterDetection } from './components/features/ChapterDetection'
@@ -17,6 +17,7 @@ import { SettingsPanel } from './components/features/SettingsPanel'
 import { UndoHistory } from './components/features/UndoHistory'
 import { ExportPanel } from './components/features/ExportPanel'
 import { SceneDetector } from './components/features/SceneDetector'
+import { ClipSearch } from './components/features/ClipSearch'
 import { type ResolveStatus, useResolveStatus } from './hooks/useResolveStatus'
 import { useProjectStore } from './stores/projectStore'
 import { useFeatureDataStore } from './stores/featureDataStore'
@@ -38,7 +39,7 @@ function getResolveStatusKey(status: ResolveStatus | null | undefined): string |
 const FEATURE_MAP: Record<string, React.ComponentType> = {
   transcript: TranscriptEditor,
   silence: SilenceRemoval,
-  filler: TranscriptEditor, // Filler detection is now part of the Transcript Editor
+  filler: FillerWordRemoval,
   captions: CaptionGenerator,
   zoom: DynamicZoom,
   chapters: ChapterDetection,
@@ -50,6 +51,7 @@ const FEATURE_MAP: Record<string, React.ComponentType> = {
   thumbnail: ThumbnailGenerator,
   export: ExportPanel,
   scenes: SceneDetector,
+  'clip-search': ClipSearch,
   settings: SettingsPanel,
   history: UndoHistory,
 }
@@ -129,7 +131,15 @@ export default function App() {
   useEffect(() => {
     setRefreshResolve(async () => {
       const nextStatus = await refresh()
-      if (!nextStatus) return
+      if (!nextStatus) {
+        setStatusOverride({
+          connected: false,
+          project: null,
+          timeline: null,
+        })
+        setPendingResolveChange(null)
+        return
+      }
       setStatusOverride(nextStatus)
       setPendingResolveChange(null)
     })

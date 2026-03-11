@@ -515,6 +515,8 @@ Transcript:
                 scores = self._score_take(
                     words, start_idx, end_idx, match_start, match_len, segments,
                 )
+                prev_word = words[start_idx - 1] if start_idx > 0 else None
+                next_word = words[end_idx] if end_idx < len(words) else None
                 takes.append({
                     "text": take_text,
                     "start": words[start_idx].get("start", 0),
@@ -523,6 +525,10 @@ Transcript:
                     "end_frame": words[end_idx - 1].get("end_frame"),
                     "source_start_frame": words[start_idx].get("source_start_frame"),
                     "source_end_frame": words[end_idx - 1].get("source_end_frame"),
+                    "prev_word_end": prev_word.get("end") if prev_word is not None else None,
+                    "prev_word_end_frame": prev_word.get("end_frame") if prev_word is not None else None,
+                    "next_word_start": next_word.get("start") if next_word is not None else None,
+                    "next_word_start_frame": next_word.get("start_frame") if next_word is not None else None,
                     "word_start_index": start_idx,
                     "word_end_index": end_idx,
                     "scores": scores,

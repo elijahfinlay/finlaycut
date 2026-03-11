@@ -262,14 +262,29 @@ class AudioService:
         next_token = cls._clean_filler_token(next_word.get("word", "")) if isinstance(next_word, dict) else ""
         if not prev_token or not next_token:
             return False
+        common_short_words = {
+            "an", "as", "at", "be", "by", "do", "go", "he", "if",
+            "in", "is", "it", "me", "my", "no", "of", "on", "or",
+            "so", "to", "up", "us", "we",
+        }
         if prev_token == next_token:
+            if prev_token in common_short_words:
+                return False
             return True
 
         shorter, longer = sorted((prev_token, next_token), key=len)
+        if not longer.startswith(shorter):
+            return False
+
+        if len(shorter) >= 3 and len(longer) - len(shorter) <= 4:
+            return True
+
         return (
-            len(shorter) >= 3
-            and len(longer) - len(shorter) <= 4
-            and longer.startswith(shorter)
+            len(shorter) == 2
+            and shorter not in common_short_words
+            and shorter[0] not in {"a", "e", "i", "o", "u"}
+            and len(longer) >= 5
+            and len(longer) - len(shorter) <= 6
         )
 
     @staticmethod
@@ -1115,6 +1130,7 @@ class AudioService:
                     "word": word_data["word"],
                     "start": word_data["start"],
                     "end": word_data["end"],
+                    "detection_source": "transcript_lexical",
                     "start_frame": word_data.get("start_frame"),
                     "end_frame": word_data.get("end_frame"),
                     "source_start_frame": word_data.get("source_start_frame"),
@@ -1143,6 +1159,7 @@ class AudioService:
                         "word": " ".join(words[i + j]["word"] for j in range(phrase_len)),
                         "start": words[i]["start"],
                         "end": words[i + phrase_len - 1]["end"],
+                        "detection_source": "transcript_lexical",
                         "start_frame": words[i].get("start_frame"),
                         "end_frame": words[i + phrase_len - 1].get("end_frame"),
                         "source_start_frame": words[i].get("source_start_frame"),
@@ -1202,10 +1219,10 @@ class AudioService:
         audio_path: str,
         transcript: dict,
         filler_words: list[str] | None = None,
-        min_duration_ms: int = 95,
-        max_duration_ms: int = 340,
+        min_duration_ms: int = 80,
+        max_duration_ms: int = 420,
         min_gap_ms: int = 45,
-        max_gap_ms: int = 750,
+        max_gap_ms: int = 950,
         sample_rate: int = 16000,
         hop_ms: int = 10,
     ) -> list[dict]:
@@ -1226,6 +1243,7 @@ class AudioService:
         allowed_families = self._allowed_hesitation_families(filler_words)
         if not allowed_families:
             return []
+        debug_enabled = bool(getattr(settings, "debug_cut_planning", False))
 
         transcript_words = [
             word for word in (transcript.get("words", []) or [])
@@ -1395,6 +1413,12 @@ class AudioService:
             context = str(gap["context"])
             prev_word = gap.get("prev_word")
             next_word = gap.get("next_word")
+            gap_debug_rejections: list[str] = []
+
+            def _record_gap_rejection(reason: str) -> None:
+                if debug_enabled and reason not in gap_debug_rejections and len(gap_debug_rejections) < 8:
+                    gap_debug_rejections.append(reason)
+
             if self._is_repetition_or_stutter_context(prev_word, next_word):
                 continue
 
@@ -1409,96 +1433,337 @@ class AudioService:
                 continue
 
             local_speech_threshold = max(
-                global_speech_threshold,
-                float(np.percentile(speech_score[idx], 70)) * 0.72,
+                global_speech_threshold * 0.88,
+                float(np.percentile(speech_score[idx], 65)) * 0.68,
             )
             local_db_floor = max(
                 global_db_floor,
-                float(np.percentile(dbfs[idx], 65)) - 10.0,
+                float(np.percentile(dbfs[idx], 60)) - 12.0,
             )
             gap_mask = (times >= gap_start) & (times <= gap_end)
-            candidate_mask = (
-                gap_mask
-                & (speech_score >= local_speech_threshold)
-                & (dbfs >= local_db_floor)
-                & (flatness <= 0.42)
-                & (zcr <= 0.19)
-                & (centroid <= 2050.0)
-                & (rolloff <= 3400.0)
-                & (high_band_ratio <= 0.22)
-            )
-            if not np.any(candidate_mask):
-                continue
+            candidate_masks = [
+                (
+                    "strict",
+                    gap_mask
+                    & (speech_score >= local_speech_threshold)
+                    & (dbfs >= local_db_floor)
+                    & (flatness <= 0.42)
+                    & (zcr <= 0.19)
+                    & (centroid <= 2050.0)
+                    & (rolloff <= 3400.0)
+                    & (high_band_ratio <= 0.22)
+                ),
+            ]
+            if not any(np.any(mask) for _, mask in candidate_masks):
+                _record_gap_rejection("no_candidate_mask")
 
-            for cand_start, cand_end in _extract_intervals(candidate_mask):
-                start = max(gap_start, cand_start)
-                end = min(gap_end, cand_end)
-                duration = end - start
-                if duration < min_duration_seconds or duration > max_duration_seconds:
+            best_detection = None
+            best_score = float("-inf")
+            for mask_name, candidate_mask in candidate_masks:
+                if not np.any(candidate_mask):
                     continue
+                for cand_start, cand_end in _extract_intervals(candidate_mask):
+                    start = max(gap_start, cand_start)
+                    end = min(gap_end, cand_end)
+                    duration = end - start
+                    whole_gap_duration_seconds = max(min_duration_seconds, 0.16)
+                    if duration < whole_gap_duration_seconds or duration > max_duration_seconds:
+                        _record_gap_rejection(f"duration:{duration:.3f}")
+                        continue
 
-                local_interval_idx = np.where((times >= start) & (times <= end))[0]
-                if local_interval_idx.size == 0:
-                    continue
+                    local_interval_idx = np.where((times >= start) & (times <= end))[0]
+                    if local_interval_idx.size == 0:
+                        _record_gap_rejection("empty_interval")
+                        continue
 
-                avg_centroid = float(np.mean(centroid[local_interval_idx]))
-                avg_rolloff = float(np.mean(rolloff[local_interval_idx]))
-                avg_flatness = float(np.mean(flatness[local_interval_idx]))
-                avg_zcr = float(np.mean(zcr[local_interval_idx]))
-                avg_high_band = float(np.mean(high_band_ratio[local_interval_idx]))
+                    avg_centroid = float(np.mean(centroid[local_interval_idx]))
+                    avg_rolloff = float(np.mean(rolloff[local_interval_idx]))
+                    avg_flatness = float(np.mean(flatness[local_interval_idx]))
+                    avg_zcr = float(np.mean(zcr[local_interval_idx]))
+                    avg_high_band = float(np.mean(high_band_ratio[local_interval_idx]))
+                    candidate_db = float(np.mean(dbfs[local_interval_idx]))
+                    whole_gap_hesitation = (
+                        gap_duration >= 0.24
+                        and gap_duration <= 0.34
+                        and duration >= gap_duration * 0.68
+                        and avg_centroid >= 850.0
+                        and avg_centroid <= 1600.0
+                        and avg_rolloff <= 2800.0
+                        and avg_flatness <= 0.10
+                        and avg_zcr >= 0.050
+                        and avg_zcr <= 0.14
+                        and avg_high_band <= 0.08
+                    )
+                    if duration >= gap_duration * 0.72 and not whole_gap_hesitation:
+                        _record_gap_rejection("too_much_gap")
+                        continue
 
-                # Prefer simple voiced hesitations instead of sibilants, clicks, or
-                # clipped consonant tails. These thresholds are intentionally biased
-                # toward "um/uh/mhm" style sounds.
-                if avg_centroid > 2100.0 or avg_rolloff > 3600.0:
-                    continue
-                if avg_flatness > 0.42 or avg_zcr > 0.20 or avg_high_band > 0.24:
-                    continue
+                    margin_window = min(0.05, max(0.025, duration * 0.8))
+                    left_idx = np.where(
+                        (times >= max(gap_start, start - margin_window))
+                        & (times <= start - 0.005)
+                    )[0]
+                    right_idx = np.where(
+                        (times >= end + 0.005)
+                        & (times <= min(gap_end, end + margin_window))
+                    )[0]
+                    lead_margin = max(0.0, start - gap_start)
+                    trail_margin = max(0.0, gap_end - end)
+                    edge_slack = min(0.14, max(0.05, gap_duration * 0.22))
+                    if lead_margin <= edge_slack and trail_margin > edge_slack:
+                        edge_mode = "left"
+                    elif trail_margin <= edge_slack and lead_margin > edge_slack:
+                        edge_mode = "right"
+                    else:
+                        edge_mode = "center"
 
-                overlaps_existing = any(
-                    max(start, word["start"]) < min(end, word["end"]) for word in sorted_words
+                    require_left_quiet = edge_mode in {"center", "right"}
+                    require_right_quiet = edge_mode in {"center", "left"}
+                    if require_left_quiet and left_idx.size < 2 and not whole_gap_hesitation:
+                        _record_gap_rejection(f"left_margin:{left_idx.size}")
+                        continue
+                    if require_right_quiet and right_idx.size < 2 and not whole_gap_hesitation:
+                        _record_gap_rejection(f"right_margin:{right_idx.size}")
+                        continue
+
+                    left_quiet = True
+                    right_quiet = True
+                    if left_idx.size >= 2:
+                        left_speech = float(np.mean(speech_score[left_idx]))
+                        left_db = float(np.mean(dbfs[left_idx]))
+                        left_quiet = (
+                            (
+                                left_speech <= local_speech_threshold * 0.84
+                                and left_db <= local_db_floor + 6.0
+                            )
+                            or (
+                                left_db <= candidate_db - 9.0
+                                and left_speech <= local_speech_threshold * 1.02
+                            )
+                        )
+                    if right_idx.size >= 2:
+                        right_speech = float(np.mean(speech_score[right_idx]))
+                        right_db = float(np.mean(dbfs[right_idx]))
+                        right_quiet = (
+                            (
+                                right_speech <= local_speech_threshold * 0.84
+                                and right_db <= local_db_floor + 6.0
+                            )
+                            or (
+                                right_db <= candidate_db - 9.0
+                                and right_speech <= local_speech_threshold * 1.02
+                            )
+                        )
+
+                    if require_left_quiet and not left_quiet and not whole_gap_hesitation:
+                        _record_gap_rejection("left_margin_speech")
+                        continue
+                    if require_right_quiet and not right_quiet and not whole_gap_hesitation:
+                        _record_gap_rejection("right_margin_speech")
+                        continue
+
+                    # Prefer simple voiced hesitations instead of sibilants, clicks, or
+                    # clipped consonant tails. These thresholds are intentionally biased
+                    # toward "um/uh/mhm" style sounds.
+                    if avg_centroid > 2100.0 or avg_rolloff > 3600.0:
+                        _record_gap_rejection("spectral_bright")
+                        continue
+                    if avg_flatness > 0.42 or avg_zcr > 0.20 or avg_high_band > 0.24:
+                        _record_gap_rejection("spectral_noisy")
+                        continue
+                    if not whole_gap_hesitation and (avg_centroid < 800.0 or avg_zcr < 0.045):
+                        _record_gap_rejection("too_monotone")
+                        continue
+                    weak_context_tokens = {"in", "is", "of", "on", "or", "to"}
+                    prev_token = self._clean_filler_token(prev_word.get("word", "")) if isinstance(prev_word, dict) else ""
+                    next_token = self._clean_filler_token(next_word.get("word", "")) if isinstance(next_word, dict) else ""
+                    prev_text = str(prev_word.get("word", "")).rstrip() if isinstance(prev_word, dict) else ""
+                    if (
+                        not whole_gap_hesitation
+                        and not prev_text.endswith((".", "?", "!", ",", ";", ":"))
+                        and (prev_token in weak_context_tokens or next_token in weak_context_tokens)
+                        and (duration < 0.20 or avg_centroid < 850.0 or avg_zcr < 0.060)
+                    ):
+                        _record_gap_rejection("weak_common_word_context")
+                        continue
+
+                    overlaps_existing = any(
+                        max(start, word["start"]) < min(end, word["end"]) for word in sorted_words
+                    )
+                    if overlaps_existing:
+                        _record_gap_rejection("overlaps_word")
+                        continue
+
+                    estimated_label = self._estimate_audio_hesitation_label(
+                        allowed_families,
+                        duration,
+                        avg_centroid,
+                        avg_rolloff,
+                        avg_zcr,
+                        avg_high_band,
+                    )
+                    if estimated_label not in {"um", "uh"}:
+                        _record_gap_rejection(f"label:{estimated_label}")
+                        continue
+                    family_match = self._matches_confident_hesitation_family(
+                        estimated_label,
+                        duration,
+                        avg_centroid,
+                        avg_rolloff,
+                        avg_zcr,
+                        avg_high_band,
+                        avg_flatness,
+                    )
+                    if (
+                        not family_match
+                        and estimated_label == "um"
+                        and 0.08 <= duration <= max_duration_seconds
+                        and avg_centroid <= 1600.0
+                        and avg_rolloff <= 2800.0
+                        and avg_zcr <= 0.12
+                        and avg_high_band <= 0.10
+                        and avg_flatness <= 0.20
+                    ):
+                        family_match = True
+                    if not family_match:
+                        _record_gap_rejection("family_mismatch")
+                        continue
+
+                    score = (
+                        duration * 2.0
+                        + (0.18 if edge_mode != "center" else 0.0)
+                        + (0.10 if whole_gap_hesitation else 0.0)
+                        + max(0.0, 1800.0 - avg_centroid) / 1800.0
+                        + max(0.0, 3200.0 - avg_rolloff) / 3200.0
+                        + max(0.0, 0.22 - avg_high_band) * 3.0
+                        + max(0.0, 0.20 - avg_flatness) * 2.0
+                    )
+                    detection = {
+                        "word": estimated_label,
+                        "start": round(start, 4),
+                        "end": round(end, 4),
+                        "duration": round(duration, 4),
+                        "context": context,
+                        "detection_source": "audio_gap",
+                        "gap_edge_mode": edge_mode,
+                        "gap_mask_source": mask_name,
+                        "prev_word": prev_word.get("word") if isinstance(prev_word, dict) else None,
+                        "prev_word_end": prev_word.get("end") if isinstance(prev_word, dict) else None,
+                        "prev_word_end_frame": prev_word.get("end_frame") if isinstance(prev_word, dict) else None,
+                        "prev_word_source_end_frame": prev_word.get("source_end_frame") if isinstance(prev_word, dict) else None,
+                        "next_word": next_word.get("word") if isinstance(next_word, dict) else None,
+                        "next_word_start": next_word.get("start") if isinstance(next_word, dict) else None,
+                        "next_word_start_frame": next_word.get("start_frame") if isinstance(next_word, dict) else None,
+                        "next_word_source_start_frame": next_word.get("source_start_frame") if isinstance(next_word, dict) else None,
+                        "selected": True,
+                        "kind": "audio_hesitation",
+                    }
+                    if debug_enabled and gap_debug_rejections:
+                        detection["debug_nearby_rejections"] = list(gap_debug_rejections)
+                    if score > best_score:
+                        best_detection = detection
+                        best_score = score
+
+            prev_text = str(prev_word.get("word", "")).rstrip() if isinstance(prev_word, dict) else ""
+            rescue_allowed = prev_text.endswith((".", "?", "!", ","))
+            if best_detection is None and rescue_allowed and gap_duration >= max(0.30, min_gap_seconds):
+                rescue_speech_threshold = max(
+                    global_speech_threshold * 0.62,
+                    float(np.percentile(speech_score[idx], 45)) * 0.54,
                 )
-                if overlaps_existing:
-                    continue
-
-                estimated_label = self._estimate_audio_hesitation_label(
-                    allowed_families,
-                    duration,
-                    avg_centroid,
-                    avg_rolloff,
-                    avg_zcr,
-                    avg_high_band,
+                rescue_db_floor = max(
+                    global_db_floor - 2.0,
+                    local_db_floor - 12.0,
                 )
-                if estimated_label not in {"um", "uh"}:
-                    continue
-                if not self._matches_confident_hesitation_family(
-                    estimated_label,
-                    duration,
-                    avg_centroid,
-                    avg_rolloff,
-                    avg_zcr,
-                    avg_high_band,
-                    avg_flatness,
-                ):
-                    continue
+                rescue_mask = (
+                    gap_mask
+                    & (speech_score >= rescue_speech_threshold)
+                    & (dbfs >= rescue_db_floor)
+                    & (flatness <= 0.12)
+                    & (zcr <= 0.20)
+                    & (centroid <= 2300.0)
+                    & (rolloff <= 4700.0)
+                    & (high_band_ratio <= 0.10)
+                )
+                rescue_intervals = self._merge_nearby_intervals(
+                    self._extract_intervals_from_mask(
+                        rescue_mask,
+                        times,
+                        hop_seconds,
+                        min_frames=max(2, int(round(0.02 / max(hop_seconds, 1e-6)))),
+                    ),
+                    max_gap_seconds=0.03,
+                )
+                rescue_threshold = gap_start + gap_duration * 0.65
+                rescue_intervals = [
+                    (float(interval_start), float(interval_end))
+                    for interval_start, interval_end in rescue_intervals
+                    if float(interval_end) >= rescue_threshold
+                ]
+                for cand_start, cand_end in sorted(rescue_intervals, key=lambda interval: (float(interval[1]), float(interval[0])), reverse=True):
+                    start = max(gap_start, float(cand_start))
+                    end = min(gap_end, float(cand_end))
+                    duration = end - start
+                    if duration < 0.02 or duration > 0.16:
+                        continue
 
-                detections.append({
-                    "word": estimated_label,
-                    "start": round(start, 4),
-                    "end": round(end, 4),
-                    "duration": round(duration, 4),
-                    "context": context,
-                    "prev_word": prev_word.get("word") if isinstance(prev_word, dict) else None,
-                    "prev_word_end": prev_word.get("end") if isinstance(prev_word, dict) else None,
-                    "prev_word_end_frame": prev_word.get("end_frame") if isinstance(prev_word, dict) else None,
-                    "prev_word_source_end_frame": prev_word.get("source_end_frame") if isinstance(prev_word, dict) else None,
-                    "next_word": next_word.get("word") if isinstance(next_word, dict) else None,
-                    "next_word_start": next_word.get("start") if isinstance(next_word, dict) else None,
-                    "next_word_start_frame": next_word.get("start_frame") if isinstance(next_word, dict) else None,
-                    "next_word_source_start_frame": next_word.get("source_start_frame") if isinstance(next_word, dict) else None,
-                    "selected": True,
-                    "kind": "audio_hesitation",
-                })
+                    local_interval_idx = np.where((times >= start) & (times <= end))[0]
+                    if local_interval_idx.size == 0:
+                        continue
+
+                    avg_centroid = float(np.mean(centroid[local_interval_idx]))
+                    avg_rolloff = float(np.mean(rolloff[local_interval_idx]))
+                    avg_flatness = float(np.mean(flatness[local_interval_idx]))
+                    avg_zcr = float(np.mean(zcr[local_interval_idx]))
+                    avg_high_band = float(np.mean(high_band_ratio[local_interval_idx]))
+                    if (
+                        avg_centroid < 850.0
+                        or avg_centroid > 2300.0
+                        or avg_rolloff > 4700.0
+                        or avg_flatness > 0.14
+                        or avg_zcr < 0.045
+                        or avg_zcr > 0.20
+                        or avg_high_band > 0.10
+                    ):
+                        continue
+
+                    estimated_label = self._estimate_audio_hesitation_label(
+                        allowed_families,
+                        max(duration, 0.08),
+                        avg_centroid,
+                        avg_rolloff,
+                        avg_zcr,
+                        avg_high_band,
+                    )
+                    if estimated_label not in {"um", "uh"}:
+                        continue
+
+                    best_detection = {
+                        "word": estimated_label,
+                        "start": round(start, 4),
+                        "end": round(end, 4),
+                        "duration": round(duration, 4),
+                        "context": context,
+                        "detection_source": "audio_gap",
+                        "gap_edge_mode": "right",
+                        "gap_mask_source": "rescue",
+                        "prev_word": prev_word.get("word") if isinstance(prev_word, dict) else None,
+                        "prev_word_end": prev_word.get("end") if isinstance(prev_word, dict) else None,
+                        "prev_word_end_frame": prev_word.get("end_frame") if isinstance(prev_word, dict) else None,
+                        "prev_word_source_end_frame": prev_word.get("source_end_frame") if isinstance(prev_word, dict) else None,
+                        "next_word": next_word.get("word") if isinstance(next_word, dict) else None,
+                        "next_word_start": next_word.get("start") if isinstance(next_word, dict) else None,
+                        "next_word_start_frame": next_word.get("start_frame") if isinstance(next_word, dict) else None,
+                        "next_word_source_start_frame": next_word.get("source_start_frame") if isinstance(next_word, dict) else None,
+                        "selected": True,
+                        "kind": "audio_hesitation",
+                    }
+                    break
+
+            if best_detection is not None:
+                detections.append(best_detection)
+            elif debug_enabled and gap_debug_rejections:
+                logger.debug("gap hesitation miss %s: %s", context, ", ".join(gap_debug_rejections))
 
         detections.sort(key=lambda detection: (detection["start"], detection["end"]))
 
@@ -1695,11 +1960,27 @@ class AudioService:
                 if continuation_idx.size < 2:
                     continue
 
+                lead_window = min(0.06, max(0.02, candidate_duration * 0.9))
+                lead_start = max(
+                    0.0,
+                    max(search_start, cand_start - lead_window) - (hop_seconds * 0.55),
+                )
+                lead_end = cand_start - (hop_seconds * 0.15)
+                pre_idx = np.where(
+                    (times >= lead_start)
+                    & (times < lead_end)
+                )[0]
+                if pre_idx.size >= 1:
+                    pre_speech = float(np.mean(speech_score[pre_idx]))
+                    pre_db = float(np.mean(dbfs[pre_idx]))
+                    if pre_speech > speech_threshold * 0.70 or pre_db > db_floor + 4.5:
+                        continue
+
                 candidate_speech = float(np.mean(speech_score[candidate_idx]))
                 continuation_speech = float(np.mean(speech_score[continuation_idx]))
                 if continuation_speech < speech_threshold * 0.72:
                     continue
-                if continuation_speech < candidate_speech + 0.03:
+                if continuation_speech < candidate_speech + 0.05:
                     continue
 
                 avg_centroid = float(np.mean(centroid[candidate_idx]))
@@ -1743,6 +2024,16 @@ class AudioService:
                     estimated_label = "uh"
                 if estimated_label not in {"um", "uh"}:
                     continue
+                if not self._matches_confident_hesitation_family(
+                    estimated_label,
+                    candidate_duration,
+                    avg_centroid,
+                    avg_rolloff,
+                    avg_zcr,
+                    avg_high_band,
+                    avg_flatness,
+                ):
+                    continue
 
                 score = (
                     candidate_duration * 2.0
@@ -1757,6 +2048,7 @@ class AudioService:
                     "end": round(cand_end, 4),
                     "duration": round(candidate_duration, 4),
                     "context": f"attached to '{word['word']}'",
+                    "detection_source": "audio_attached_onset",
                     "kind": "audio_hesitation",
                     "attachment": "word_onset",
                     "attached_word": word.get("word"),
@@ -1803,6 +2095,374 @@ class AudioService:
 
             if best_detection is not None:
                 detections.append(best_detection)
+
+        detections.sort(key=lambda detection: (float(detection["start"]), float(detection["end"])))
+        return detections
+
+    def detect_attached_hesitation_offsets(
+        self,
+        transcript: dict,
+        filler_words: list[str] | None = None,
+        profile: dict[str, Any] | None = None,
+        min_duration_ms: int = 70,
+        max_duration_ms: int = 260,
+        max_suffix_ms: int = 280,
+        max_forward_ms: int = 80,
+        min_leading_word_ms: int = 90,
+    ) -> list[dict]:
+        """
+        Recover likely attached `uh`/`um` hesitations that were blended into
+        the tail of the previous spoken word instead of becoming their own
+        transcript token.
+
+        This complements `detect_attached_hesitation_onsets` and is likewise
+        precision-biased: it only accepts low-complexity hesitation-like tails
+        near a word boundary, with clearer non-hesitation speech before them.
+        """
+        allowed_families = self._allowed_hesitation_families(filler_words) & {"um", "uh"}
+        if not allowed_families or profile is None:
+            return []
+        debug_enabled = bool(getattr(settings, "debug_cut_planning", False))
+
+        times = profile.get("times")
+        speech_score = profile.get("speech_score")
+        dbfs = profile.get("dbfs")
+        flatness = profile.get("flatness")
+        centroid = profile.get("centroid")
+        rolloff = profile.get("rolloff")
+        zcr = profile.get("zcr")
+        high_band_ratio = profile.get("high_band_ratio")
+        duration = float(profile.get("duration") or 0.0)
+        hop_seconds = float(profile.get("hop_seconds") or 0.0)
+        if (
+            times is None or speech_score is None or dbfs is None or flatness is None
+            or centroid is None or rolloff is None or zcr is None or high_band_ratio is None
+            or hop_seconds <= 0.0 or duration <= 0.0
+        ):
+            return []
+
+        transcript_words = []
+        for raw_word in (transcript.get("words", []) or []):
+            text = str(raw_word.get("word", "")).strip()
+            if not text or text.startswith("["):
+                continue
+            try:
+                start = max(0.0, min(duration, float(raw_word.get("start", 0.0))))
+                end = max(start, min(duration, float(raw_word.get("end", start))))
+            except Exception:
+                continue
+            transcript_words.append({
+                **raw_word,
+                "word": text,
+                "start": start,
+                "end": end,
+            })
+
+        if not transcript_words:
+            return []
+
+        transcript_words.sort(key=lambda word: (float(word["start"]), float(word["end"])))
+
+        global_speech_threshold = max(
+            float(np.percentile(speech_score, 48)),
+            float(np.percentile(speech_score, 60)) * 0.74,
+        )
+        global_db_floor = max(-62.0, float(np.percentile(dbfs, 24)) - 5.0)
+        min_duration_seconds = min_duration_ms / 1000.0
+        max_duration_seconds = max_duration_ms / 1000.0
+        max_suffix_seconds = max_suffix_ms / 1000.0
+        max_forward_seconds = max_forward_ms / 1000.0
+        min_leading_word_seconds = min_leading_word_ms / 1000.0
+        min_frames = max(2, int(round(min_duration_seconds / max(hop_seconds, 1e-6))))
+        near_zero_gap_seconds = max(0.02, hop_seconds * 3.0)
+
+        detections: list[dict] = []
+        for index, word in enumerate(transcript_words):
+            cleaned = self._clean_filler_token(word["word"])
+            if not cleaned:
+                continue
+            if self._hesitation_family(cleaned) in allowed_families:
+                continue
+
+            word_start = float(word["start"])
+            word_end = float(word["end"])
+            word_duration = word_end - word_start
+            if word_duration < (min_duration_seconds + min_leading_word_seconds):
+                continue
+
+            prev_word = transcript_words[index - 1] if index > 0 else None
+            next_word = transcript_words[index + 1] if index < len(transcript_words) - 1 else None
+            next_word_start = float(next_word["start"]) if next_word is not None else duration
+            next_word_gap = max(0.0, next_word_start - word_end) if next_word is not None else None
+            word_debug_rejections: list[str] = []
+
+            def _record_tail_rejection(reason: str) -> None:
+                if debug_enabled and reason not in word_debug_rejections and len(word_debug_rejections) < 8:
+                    word_debug_rejections.append(reason)
+
+            prev_cleaned = self._clean_filler_token(prev_word["word"]) if isinstance(prev_word, dict) else ""
+            next_cleaned = self._clean_filler_token(next_word["word"]) if isinstance(next_word, dict) else ""
+            if self._is_repetition_or_stutter_context(prev_word, word) or self._is_repetition_or_stutter_context(word, next_word):
+                continue
+            if (prev_cleaned and prev_cleaned == cleaned) or (next_cleaned and next_cleaned == cleaned):
+                continue
+            if next_word_gap is not None and next_word_gap <= near_zero_gap_seconds:
+                _record_tail_rejection("near_zero_gap")
+                continue
+
+            search_start = max(
+                word_start,
+                word_end - min(max_suffix_seconds, max(word_duration * 0.55, min_duration_seconds + 0.03)),
+            )
+            search_end = min(duration, max(word_end, next_word_start) + max_forward_seconds)
+            if next_word is not None:
+                search_end = min(search_end, next_word_start)
+            if search_end - search_start < min_duration_seconds:
+                continue
+
+            window_idx = np.where((times >= search_start) & (times <= search_end))[0]
+            if window_idx.size < min_frames:
+                continue
+
+            local_speech = speech_score[window_idx]
+            local_dbfs = dbfs[window_idx]
+            speech_threshold = max(
+                global_speech_threshold * 0.90,
+                float(np.percentile(local_speech, 55)) * 0.76,
+            )
+            db_floor = max(
+                global_db_floor,
+                float(np.percentile(local_dbfs, 35)) - 8.0,
+            )
+
+            base_mask = (times >= search_start) & (times <= search_end)
+            tail_mask = (
+                base_mask
+                & (speech_score >= speech_threshold)
+                & (dbfs >= db_floor)
+                & (flatness <= 0.36)
+                & (zcr <= 0.14)
+                & (centroid <= 1700.0)
+                & (rolloff <= 2800.0)
+                & (high_band_ratio <= 0.15)
+            )
+            candidate_intervals = self._merge_nearby_intervals(
+                self._extract_intervals_from_mask(
+                    tail_mask,
+                    times,
+                    hop_seconds,
+                    min_frames=min_frames,
+                ),
+                max_gap_seconds=0.02,
+            )
+            if not candidate_intervals:
+                continue
+
+            best_detection = None
+            best_score = float("-inf")
+
+            for cand_start, cand_end in candidate_intervals:
+                cand_start = max(search_start, float(cand_start))
+                cand_end = min(search_end, float(cand_end))
+                candidate_duration = cand_end - cand_start
+                if candidate_duration < min_duration_seconds or candidate_duration > max_duration_seconds:
+                    _record_tail_rejection(f"duration:{candidate_duration:.3f}")
+                    continue
+
+                end_slop_seconds = max(0.02, hop_seconds * 2.0)
+                if cand_end < word_end - end_slop_seconds:
+                    _record_tail_rejection("ends_too_early")
+                    continue
+                if cand_start >= word_end - 0.035:
+                    _record_tail_rejection("starts_too_late")
+                    continue
+                tail_extension = cand_end - word_end
+                if tail_extension < max(0.015, hop_seconds * 1.5):
+                    _record_tail_rejection("no_post_word_extension")
+                    continue
+                if cand_start - word_start < min_leading_word_seconds:
+                    _record_tail_rejection("not_enough_lead")
+                    continue
+
+                candidate_idx = np.where((times >= cand_start) & (times <= cand_end))[0]
+                if candidate_idx.size < min_frames:
+                    _record_tail_rejection("candidate_window_too_small")
+                    continue
+
+                lead_start = max(word_start, cand_start - 0.14)
+                lead_end = max(lead_start, cand_start - 0.01)
+                lead_idx = np.where((times >= lead_start) & (times <= lead_end))[0]
+                if lead_idx.size < 2:
+                    _record_tail_rejection("missing_lead_window")
+                    continue
+
+                trail_start = min(search_end, cand_end + 0.005)
+                trail_end = min(search_end, cand_end + 0.06)
+                trail_idx = np.where((times >= trail_start) & (times <= trail_end))[0]
+                if trail_idx.size < 2:
+                    _record_tail_rejection("missing_trailing_window")
+                    continue
+
+                lead_speech = float(np.mean(speech_score[lead_idx]))
+                lead_db = float(np.mean(dbfs[lead_idx]))
+                if lead_speech < speech_threshold * 0.78 or lead_db < db_floor + 2.0:
+                    _record_tail_rejection("weak_lead")
+                    continue
+
+                candidate_speech = float(np.mean(speech_score[candidate_idx]))
+                avg_centroid = float(np.mean(centroid[candidate_idx]))
+                avg_rolloff = float(np.mean(rolloff[candidate_idx]))
+                avg_flatness = float(np.mean(flatness[candidate_idx]))
+                avg_zcr = float(np.mean(zcr[candidate_idx]))
+                avg_high_band = float(np.mean(high_band_ratio[candidate_idx]))
+                if avg_flatness > 0.40 or avg_zcr > 0.17 or avg_high_band > 0.19:
+                    _record_tail_rejection("candidate_noisy")
+                    continue
+
+                lead_centroid = float(np.mean(centroid[lead_idx]))
+                lead_rolloff = float(np.mean(rolloff[lead_idx]))
+                lead_zcr = float(np.mean(zcr[lead_idx]))
+                lead_high_band = float(np.mean(high_band_ratio[lead_idx]))
+                has_spectral_shift = (
+                    lead_centroid >= avg_centroid + 90.0
+                    or lead_rolloff >= avg_rolloff + 150.0
+                    or lead_zcr >= avg_zcr + 0.012
+                    or lead_high_band >= avg_high_band + 0.012
+                )
+                if not has_spectral_shift:
+                    _record_tail_rejection("missing_shift")
+                    continue
+
+                trail_speech = float(np.mean(speech_score[trail_idx]))
+                trail_db = float(np.mean(dbfs[trail_idx]))
+                strict_tail_gap_seconds = max(0.06, candidate_duration * 0.35)
+                if next_word_gap is None or next_word_gap <= strict_tail_gap_seconds:
+                    if trail_speech > speech_threshold * 0.78:
+                        _record_tail_rejection("trail_speech_strict")
+                        continue
+                    if trail_db > db_floor + 3.5:
+                        _record_tail_rejection("trail_db_strict")
+                        continue
+                else:
+                    post_gap_end = min(search_end, next_word_start)
+                    post_gap_idx = np.where(
+                        (times >= max(cand_end + 0.005, trail_start))
+                        & (times <= max(cand_end + 0.005, post_gap_end - 0.005))
+                    )[0]
+                    if post_gap_idx.size < 2:
+                        _record_tail_rejection("missing_post_gap_window")
+                        continue
+                    valley_min_frames = max(2, int(round(0.02 / max(hop_seconds, 1e-6))))
+                    quiet_mask = (
+                        (times >= max(cand_end + 0.005, trail_start))
+                        & (times <= post_gap_end)
+                        & (speech_score <= speech_threshold * 0.76)
+                        & (dbfs <= db_floor + 6.0)
+                    )
+                    quiet_intervals = self._extract_intervals_from_mask(
+                        quiet_mask,
+                        times,
+                        hop_seconds,
+                        min_frames=valley_min_frames,
+                    )
+                    if not quiet_intervals:
+                        _record_tail_rejection("missing_post_gap_valley")
+                        continue
+                    quiet_start = min(float(interval[0]) for interval in quiet_intervals)
+                    if quiet_start - cand_end > min(0.18, max(0.08, next_word_gap * 0.75)):
+                        _record_tail_rejection("valley_too_late")
+                        continue
+                    if trail_speech > speech_threshold * 0.92 and trail_db > db_floor + 6.0:
+                        _record_tail_rejection("immediate_trail_too_hot")
+                        continue
+
+                estimated_label = self._estimate_audio_hesitation_label(
+                    allowed_families,
+                    candidate_duration,
+                    avg_centroid,
+                    avg_rolloff,
+                    avg_zcr,
+                    avg_high_band,
+                )
+                if estimated_label not in {"um", "uh"}:
+                    _record_tail_rejection(f"label:{estimated_label}")
+                    continue
+                if not self._matches_confident_hesitation_family(
+                    estimated_label,
+                    candidate_duration,
+                    avg_centroid,
+                    avg_rolloff,
+                    avg_zcr,
+                    avg_high_band,
+                    avg_flatness,
+                ):
+                    _record_tail_rejection("family_mismatch")
+                    continue
+
+                score = (
+                    candidate_duration * 2.0
+                    + max(0.0, lead_centroid - avg_centroid) / 1000.0
+                    + max(0.0, lead_rolloff - avg_rolloff) / 1500.0
+                    + max(0.0, lead_high_band - avg_high_band) * 4.0
+                    - candidate_speech * 0.2
+                )
+
+                detection = {
+                    "word": estimated_label,
+                    "start": round(cand_start, 4),
+                    "end": round(cand_end, 4),
+                    "duration": round(candidate_duration, 4),
+                    "context": f"attached to '{word['word']}'",
+                    "detection_source": "audio_attached_tail",
+                    "kind": "audio_hesitation",
+                    "attachment": "word_offset",
+                    "attached_word": word.get("word"),
+                    "attached_word_start": word_start,
+                    "attached_word_end": word_end,
+                    "attached_word_end_frame": word.get("end_frame"),
+                    "attached_word_source_end_frame": word.get("source_end_frame"),
+                    "selected": True,
+                    "boundary_source": "waveform",
+                    "next_word": next_word.get("word") if isinstance(next_word, dict) else None,
+                    "next_word_start": next_word.get("start") if isinstance(next_word, dict) else None,
+                    "next_word_start_frame": next_word.get("start_frame") if isinstance(next_word, dict) else None,
+                    "next_word_source_start_frame": next_word.get("source_start_frame") if isinstance(next_word, dict) else None,
+                }
+                if debug_enabled and word_debug_rejections:
+                    detection["debug_nearby_rejections"] = list(word_debug_rejections)
+                detection["start_frame"] = self._estimate_word_relative_frame(
+                    word,
+                    cand_start,
+                    "start_frame",
+                    "end_frame",
+                )
+                detection["end_frame"] = self._estimate_word_relative_frame(
+                    word,
+                    cand_end,
+                    "start_frame",
+                    "end_frame",
+                )
+                detection["source_start_frame"] = self._estimate_word_relative_frame(
+                    word,
+                    cand_start,
+                    "source_start_frame",
+                    "source_end_frame",
+                )
+                detection["source_end_frame"] = self._estimate_word_relative_frame(
+                    word,
+                    cand_end,
+                    "source_start_frame",
+                    "source_end_frame",
+                )
+
+                if score > best_score:
+                    best_detection = detection
+                    best_score = score
+
+            if best_detection is not None:
+                detections.append(best_detection)
+            elif debug_enabled and word_debug_rejections:
+                logger.debug("tail hesitation miss for '%s': %s", word["word"], ", ".join(word_debug_rejections))
 
         detections.sort(key=lambda detection: (float(detection["start"]), float(detection["end"])))
         return detections
@@ -1905,17 +2565,151 @@ class AudioService:
     def _segments_with_boundary_source(self, segments: list[dict], source: str) -> list[dict]:
         updated_segments = []
         for seg in segments:
-            updated = dict(seg)
-            try:
-                updated["duration"] = round(
-                    max(0.0, float(updated.get("end", 0.0)) - float(updated.get("start", 0.0))),
-                    4,
+            updated_segments.append(
+                self._annotate_refined_segment(
+                    seg,
+                    boundary_source=source,
+                    refine_reason="seed_fallback" if source != "waveform" else "waveform_refine",
+                    used_fallback_seed=source != "waveform",
                 )
-            except Exception:
-                pass
-            updated["boundary_source"] = source
-            updated_segments.append(updated)
+            )
         return updated_segments
+
+    @staticmethod
+    def _clamp01(value: float) -> float:
+        return max(0.0, min(1.0, float(value)))
+
+    def _annotate_refined_segment(
+        self,
+        segment: dict,
+        *,
+        boundary_source: str | None = None,
+        refine_confidence: float | None = None,
+        refine_reason: str | None = None,
+        used_fallback_seed: bool | None = None,
+    ) -> dict:
+        updated = dict(segment)
+        try:
+            updated["duration"] = round(
+                max(0.0, float(updated.get("end", 0.0)) - float(updated.get("start", 0.0))),
+                4,
+            )
+        except Exception:
+            pass
+        if boundary_source is not None:
+            updated["boundary_source"] = boundary_source
+        updated["refine_confidence"] = (
+            round(self._clamp01(refine_confidence), 3)
+            if refine_confidence is not None
+            else None
+        )
+        updated["refine_reason"] = str(refine_reason or "unspecified")
+        updated["used_fallback_seed"] = bool(used_fallback_seed)
+        return updated
+
+    def _measure_silence_valley_confidence(
+        self,
+        profile: dict[str, Any],
+        interval_start: float,
+        interval_end: float,
+        window_start: float,
+        window_end: float,
+    ) -> tuple[float, str]:
+        times = profile["times"]
+        speech_score = profile["speech_score"]
+        dbfs = profile["dbfs"]
+        valley_idx = np.where((times >= interval_start) & (times <= interval_end))[0]
+        if valley_idx.size == 0:
+            return 0.0, "missing_valley_window"
+
+        shoulder_span = max(0.12, min(0.28, max(window_end - window_start, 0.12) / 2.0))
+        left_idx = np.where((times >= max(window_start, interval_start - shoulder_span)) & (times < interval_start))[0]
+        right_idx = np.where((times > interval_end) & (times <= min(window_end, interval_end + shoulder_span)))[0]
+        shoulder_idx = np.concatenate([left_idx, right_idx]) if left_idx.size or right_idx.size else np.array([], dtype=int)
+        if shoulder_idx.size == 0:
+            return 0.0, "missing_shoulders"
+
+        valley_speech_mean = float(np.mean(speech_score[valley_idx]))
+        valley_speech_peak = float(np.percentile(speech_score[valley_idx], 85))
+        valley_db_mean = float(np.mean(dbfs[valley_idx]))
+        shoulder_speech = float(np.percentile(speech_score[shoulder_idx], 70))
+        shoulder_db = float(np.percentile(dbfs[shoulder_idx], 70))
+        speech_contrast = max(0.0, shoulder_speech - valley_speech_peak)
+        db_contrast = max(0.0, shoulder_db - valley_db_mean)
+
+        confidence = self._clamp01(
+            0.60 * (speech_contrast / 0.30)
+            + 0.25 * (db_contrast / 10.0)
+            + 0.15 * self._clamp01((0.45 - valley_speech_mean) / 0.45)
+        )
+        loud_background = valley_db_mean > -24.0
+        elevated_valley_speech = valley_speech_mean > 0.42
+        if speech_contrast >= 0.18 and db_contrast >= 4.0 and not loud_background and not elevated_valley_speech:
+            return confidence, "validated_dialogue_valley"
+        if speech_contrast >= 0.24 and not loud_background and not elevated_valley_speech:
+            return confidence, "validated_speech_contrast"
+        return confidence, "weak_dialogue_valley"
+
+    def _spoken_refine_defaults(self) -> dict[str, float | int]:
+        return {
+            "left_search_ms": int(getattr(settings, "spoken_refine_left_search_ms", 220)),
+            "right_search_ms": int(getattr(settings, "spoken_refine_right_search_ms", 320)),
+            "start_guard_ms": int(getattr(settings, "spoken_refine_start_guard_ms", 12)),
+            "end_guard_ms": int(getattr(settings, "spoken_refine_end_guard_ms", 32)),
+            "min_duration_ms": int(getattr(settings, "spoken_refine_min_duration_ms", 30)),
+            "zero_cross_window_ms": float(getattr(settings, "spoken_refine_zero_cross_window_ms", 2.0)),
+            "expand_confidence_threshold": float(getattr(settings, "spoken_refine_expand_confidence_threshold", 0.52)),
+            "fallback_confidence_threshold": float(getattr(settings, "spoken_refine_fallback_confidence_threshold", 0.28)),
+            "low_confidence_max_expand_ms": int(getattr(settings, "spoken_refine_low_confidence_max_expand_ms", 45)),
+        }
+
+    def _spoken_refine_seed_fallback(self, segment: dict, reason: str, confidence: float | None = None) -> dict:
+        return self._annotate_refined_segment(
+            segment,
+            boundary_source="seed",
+            refine_confidence=confidence,
+            refine_reason=reason,
+            used_fallback_seed=True,
+        )
+
+    def _spoken_refine_confidence(
+        self,
+        *,
+        seed_start: float,
+        seed_end: float,
+        component_start: float,
+        component_end: float,
+        refined_start: float,
+        refined_end: float,
+        left_bound: float,
+        right_bound: float,
+        valley_left_score: float,
+        valley_right_score: float,
+        speech_left_score: float,
+        speech_right_score: float,
+        local_floor: float,
+        local_ceiling: float,
+    ) -> float:
+        seed_duration = max(seed_end - seed_start, 1e-6)
+        component_duration = max(component_end - component_start, 1e-6)
+        refined_duration = max(refined_end - refined_start, 1e-6)
+        overlap = max(0.0, min(seed_end, component_end) - max(seed_start, component_start))
+        overlap_score = self._clamp01(overlap / seed_duration)
+        component_score = self._clamp01(overlap / component_duration)
+        seed_coverage = self._clamp01(
+            max(0.0, min(seed_end, refined_end) - max(seed_start, refined_start)) / seed_duration
+        )
+        shrink_penalty = self._clamp01(max(0.0, seed_duration - refined_duration) / seed_duration)
+        score_span = max(local_ceiling - local_floor, 1e-6)
+        onset_contrast = self._clamp01((speech_left_score - valley_left_score) / score_span)
+        offset_contrast = self._clamp01((speech_right_score - valley_right_score) / score_span)
+        return self._clamp01(
+            0.32 * max(overlap_score, component_score)
+            + 0.24 * seed_coverage
+            + 0.22 * onset_contrast
+            + 0.22 * offset_contrast
+            - 0.18 * shrink_penalty
+        )
 
     @staticmethod
     def _find_nearest_zero_crossing(
@@ -2185,6 +2979,361 @@ class AudioService:
             "dbfs": dbfs,
         }
 
+    def refine_spoken_segments_to_waveform(
+        self,
+        audio_path: str,
+        segments: list[dict],
+        *,
+        sample_rate: int = 16000,
+        hop_ms: int = 5,
+        left_search_ms: int | None = None,
+        right_search_ms: int | None = None,
+        start_guard_ms: int | None = None,
+        end_guard_ms: int | None = None,
+        min_duration_ms: int | None = None,
+        zero_cross_window_ms: float | None = None,
+        expand_confidence_threshold: float | None = None,
+        fallback_confidence_threshold: float | None = None,
+        low_confidence_max_expand_ms: int | None = None,
+        profile: dict[str, Any] | None = None,
+    ) -> list[dict]:
+        if not segments:
+            return []
+
+        defaults = self._spoken_refine_defaults()
+        left_search_ms = int(left_search_ms if left_search_ms is not None else defaults["left_search_ms"])
+        right_search_ms = int(right_search_ms if right_search_ms is not None else defaults["right_search_ms"])
+        start_guard_ms = int(start_guard_ms if start_guard_ms is not None else defaults["start_guard_ms"])
+        end_guard_ms = int(end_guard_ms if end_guard_ms is not None else defaults["end_guard_ms"])
+        min_duration_ms = int(min_duration_ms if min_duration_ms is not None else defaults["min_duration_ms"])
+        zero_cross_window_ms = float(
+            zero_cross_window_ms if zero_cross_window_ms is not None else defaults["zero_cross_window_ms"]
+        )
+        expand_confidence_threshold = float(
+            expand_confidence_threshold
+            if expand_confidence_threshold is not None
+            else defaults["expand_confidence_threshold"]
+        )
+        fallback_confidence_threshold = float(
+            fallback_confidence_threshold
+            if fallback_confidence_threshold is not None
+            else defaults["fallback_confidence_threshold"]
+        )
+        low_confidence_max_expand_ms = int(
+            low_confidence_max_expand_ms
+            if low_confidence_max_expand_ms is not None
+            else defaults["low_confidence_max_expand_ms"]
+        )
+
+        profile = profile or self.build_waveform_profile(audio_path, sample_rate=sample_rate, hop_ms=hop_ms)
+        if profile is None:
+            return [
+                self._spoken_refine_seed_fallback(segment, "waveform_profile_unavailable")
+                for segment in segments
+            ]
+
+        try:
+            y_raw = load_audio_np(audio_path, sr=sample_rate)
+        except Exception:
+            y_raw = None
+
+        times = profile["times"]
+        speech_score = profile["speech_score"]
+        speech_energy = profile["speech_energy"]
+        dbfs = profile["dbfs"]
+        duration = float(profile["duration"])
+        hop_seconds = float(profile["hop_seconds"])
+        min_duration_seconds = max(0.0, min_duration_ms / 1000.0)
+        left_search_seconds = max(0.0, left_search_ms / 1000.0)
+        right_search_seconds = max(0.0, right_search_ms / 1000.0)
+        low_confidence_expand_seconds = max(0.0, low_confidence_max_expand_ms / 1000.0)
+        start_guard_seconds = max(0.0, start_guard_ms / 1000.0)
+        end_guard_seconds = max(0.0, end_guard_ms / 1000.0)
+        min_frames = max(1, int(round(min_duration_seconds / max(hop_seconds, 1e-6))))
+        refined_segments: list[dict] = []
+
+        for seg in segments:
+            try:
+                seed_start = max(0.0, min(duration, float(seg["start"])))
+                seed_end = max(0.0, min(duration, float(seg["end"])))
+            except Exception:
+                refined_segments.append(self._spoken_refine_seed_fallback(seg, "invalid_seed"))
+                continue
+
+            if seed_end <= seed_start:
+                refined_segments.append(self._spoken_refine_seed_fallback(seg, "empty_seed"))
+                continue
+
+            prev_word_end = None
+            next_word_start = None
+            try:
+                if seg.get("prev_word_end") is not None:
+                    prev_word_end = max(0.0, min(duration, float(seg["prev_word_end"])))
+            except Exception:
+                prev_word_end = None
+            try:
+                if seg.get("next_word_start") is not None:
+                    next_word_start = max(0.0, min(duration, float(seg["next_word_start"])))
+            except Exception:
+                next_word_start = None
+
+            search_start = max(0.0, seed_start - left_search_seconds)
+            search_end = min(duration, seed_end + right_search_seconds)
+            if prev_word_end is not None:
+                search_start = max(search_start, prev_word_end)
+            if next_word_start is not None:
+                search_end = min(search_end, next_word_start)
+            if search_end <= search_start:
+                refined_segments.append(self._spoken_refine_seed_fallback(seg, "search_window_collapsed"))
+                continue
+
+            window_idx = np.where((times >= search_start) & (times <= search_end))[0]
+            if window_idx.size == 0:
+                refined_segments.append(self._spoken_refine_seed_fallback(seg, "search_window_empty"))
+                continue
+
+            local_speech = speech_score[window_idx]
+            local_dbfs = dbfs[window_idx]
+            local_floor = float(np.percentile(local_speech, 20))
+            local_ceiling = float(np.percentile(local_speech, 90))
+            strict_threshold = max(
+                float(np.percentile(local_speech, 58)),
+                local_ceiling * 0.70,
+            )
+            relaxed_threshold = max(
+                float(np.percentile(local_speech, 42)),
+                strict_threshold * 0.78,
+            )
+            db_floor = max(-60.0, float(np.percentile(local_dbfs, 28)) - 6.0)
+            base_mask = (times >= search_start) & (times <= search_end)
+            candidate_masks = [
+                base_mask & (speech_score >= strict_threshold) & (dbfs >= db_floor),
+                base_mask & (speech_score >= relaxed_threshold) & (dbfs >= db_floor - 5.0),
+            ]
+
+            component_interval = None
+            component_reason = "component_overlap"
+            for candidate_mask in candidate_masks:
+                candidate_intervals = self._merge_nearby_intervals(
+                    self._extract_intervals_from_mask(
+                        candidate_mask,
+                        times,
+                        hop_seconds,
+                        min_frames=max(1, min_frames // 2),
+                    ),
+                    max_gap_seconds=0.06,
+                )
+                component_interval = self._select_interval_by_overlap(candidate_intervals, seed_start, seed_end)
+                if component_interval is not None:
+                    break
+
+            if component_interval is None:
+                refined_segments.append(self._spoken_refine_seed_fallback(seg, "weak_acoustic_evidence", 0.0))
+                continue
+
+            component_start = max(search_start, float(component_interval[0]))
+            component_end = min(search_end, float(component_interval[1]))
+            continuation_threshold = max(float(np.percentile(local_speech, 34)), relaxed_threshold * 0.70)
+            continuation_mask = base_mask & (speech_score >= continuation_threshold) & (dbfs >= db_floor - 7.0)
+            continuation_interval = self._select_interval_by_overlap(
+                self._merge_nearby_intervals(
+                    self._extract_intervals_from_mask(
+                        continuation_mask,
+                        times,
+                        hop_seconds,
+                        min_frames=max(1, min_frames // 3),
+                    ),
+                    max_gap_seconds=0.08,
+                ),
+                component_start,
+                component_end,
+            )
+            if continuation_interval is not None:
+                continuation_start = max(search_start, float(continuation_interval[0]))
+                continuation_end = min(search_end, float(continuation_interval[1]))
+                extends_left = continuation_start < (component_start - max(hop_seconds, 0.01))
+                extends_right = continuation_end > (component_end + max(hop_seconds, 0.01))
+                fully_covers_component = (
+                    continuation_start <= component_start + max(hop_seconds, 0.01)
+                    and continuation_end >= component_end - max(hop_seconds, 0.01)
+                )
+                if fully_covers_component and (extends_left or extends_right):
+                    component_start = continuation_start
+                    component_end = continuation_end
+                    component_reason = "continuation_component"
+
+            left_bound = max(search_start, prev_word_end) if prev_word_end is not None else search_start
+            left_release_bound = (
+                min(seed_end, prev_word_end + start_guard_seconds)
+                if prev_word_end is not None
+                else left_bound
+            )
+            right_bound = min(search_end, next_word_start) if next_word_start is not None else search_end
+            right_release_bound = right_bound
+            if next_word_start is not None:
+                right_release_bound = max(component_start + min_duration_seconds, next_word_start - end_guard_seconds)
+
+            start_candidate = self._pick_valley_time(
+                profile,
+                component_start,
+                max(left_bound, component_start - min(left_search_seconds, 0.10)),
+                component_start,
+            )
+            end_candidate = self._pick_valley_time(
+                profile,
+                component_end,
+                component_end,
+                min(right_release_bound, component_end + min(right_search_seconds, 0.14)),
+            )
+
+            start_candidate = max(left_bound, min(component_start, start_candidate))
+            end_candidate = min(right_release_bound, max(component_end, end_candidate))
+
+            valley_left_idx = np.where(
+                (times >= max(left_bound, start_candidate - max(hop_seconds, 0.01)))
+                & (times <= start_candidate + max(hop_seconds, 0.01))
+            )[0]
+            valley_right_idx = np.where(
+                (times >= max(component_end, end_candidate - max(hop_seconds, 0.01)))
+                & (times <= min(right_bound, end_candidate + max(hop_seconds, 0.01)))
+            )[0]
+            speech_left_idx = np.where(
+                (times >= component_start)
+                & (times <= min(right_bound, component_start + max(0.03, 3.0 * hop_seconds)))
+            )[0]
+            speech_right_idx = np.where(
+                (times >= max(left_bound, component_end - max(0.03, 3.0 * hop_seconds)))
+                & (times <= component_end)
+            )[0]
+
+            valley_left_score = float(np.mean(speech_energy[valley_left_idx])) if valley_left_idx.size else float(
+                np.mean(speech_energy[window_idx])
+            )
+            valley_right_score = float(np.mean(speech_energy[valley_right_idx])) if valley_right_idx.size else float(
+                np.mean(speech_energy[window_idx])
+            )
+            speech_left_score = float(np.percentile(speech_energy[speech_left_idx], 75)) if speech_left_idx.size else float(
+                np.percentile(speech_energy[window_idx], 75)
+            )
+            speech_right_score = float(np.percentile(speech_energy[speech_right_idx], 75)) if speech_right_idx.size else float(
+                np.percentile(speech_energy[window_idx], 75)
+            )
+
+            preliminary_confidence = self._spoken_refine_confidence(
+                seed_start=seed_start,
+                seed_end=seed_end,
+                component_start=component_start,
+                component_end=component_end,
+                refined_start=start_candidate,
+                refined_end=end_candidate,
+                left_bound=left_bound,
+                right_bound=right_bound,
+                valley_left_score=valley_left_score,
+                valley_right_score=valley_right_score,
+                speech_left_score=speech_left_score,
+                speech_right_score=speech_right_score,
+                local_floor=local_floor,
+                local_ceiling=local_ceiling,
+            )
+
+            seed_clamped_start = max(left_bound, seed_start)
+            seed_clamped_end = min(right_release_bound, seed_end)
+            seed_duration = max(seed_end - seed_start, 1e-6)
+            component_overlap = max(0.0, min(seed_end, component_end) - max(seed_start, component_start))
+            component_overlap_ratio = self._clamp01(component_overlap / seed_duration)
+            refined_duration = max(end_candidate - start_candidate, 1e-6)
+            refined_duration_ratio = self._clamp01(refined_duration / seed_duration)
+            allow_inward_shrink = (
+                preliminary_confidence >= max(0.82, expand_confidence_threshold + 0.20)
+                and component_overlap_ratio >= 0.88
+                and refined_duration_ratio >= 0.82
+            )
+            if not allow_inward_shrink and seed_clamped_end > seed_clamped_start:
+                preserved_start = max(left_bound, min(start_candidate, seed_clamped_start))
+                preserved_end = min(right_release_bound, max(end_candidate, seed_clamped_end))
+                if preserved_start != start_candidate or preserved_end != end_candidate:
+                    start_candidate = preserved_start
+                    end_candidate = preserved_end
+                    if component_reason == "continuation_component":
+                        component_reason = "seed_preserving_component"
+
+            confidence = self._spoken_refine_confidence(
+                seed_start=seed_start,
+                seed_end=seed_end,
+                component_start=component_start,
+                component_end=component_end,
+                refined_start=start_candidate,
+                refined_end=end_candidate,
+                left_bound=left_bound,
+                right_bound=right_bound,
+                valley_left_score=valley_left_score,
+                valley_right_score=valley_right_score,
+                speech_left_score=speech_left_score,
+                speech_right_score=speech_right_score,
+                local_floor=local_floor,
+                local_ceiling=local_ceiling,
+            )
+
+            if confidence < fallback_confidence_threshold:
+                refined_segments.append(
+                    self._spoken_refine_seed_fallback(seg, "weak_acoustic_evidence", confidence)
+                )
+                continue
+
+            refine_reason = component_reason
+            if confidence < expand_confidence_threshold:
+                start_candidate = max(
+                    start_candidate,
+                    max(left_release_bound, seed_start - low_confidence_expand_seconds),
+                )
+                end_candidate = min(end_candidate, seed_end + low_confidence_expand_seconds)
+                refine_reason = "low_confidence_capped_expand"
+
+            if end_candidate - start_candidate < min_duration_seconds:
+                midpoint = (seed_start + seed_end) / 2.0
+                half = min_duration_seconds / 2.0
+                start_candidate = max(left_bound, midpoint - half)
+                end_candidate = min(right_release_bound, midpoint + half)
+
+            if end_candidate <= start_candidate:
+                refined_segments.append(
+                    self._spoken_refine_seed_fallback(seg, "collapsed_after_refine", confidence)
+                )
+                continue
+
+            if y_raw is not None and y_raw.size > 0 and zero_cross_window_ms > 0.0:
+                start_sample = max(0, min(len(y_raw) - 1, int(round(start_candidate * sample_rate))))
+                end_sample = max(0, min(len(y_raw) - 1, int(round(end_candidate * sample_rate))))
+                start_candidate = self._find_nearest_zero_crossing(
+                    y_raw,
+                    start_sample,
+                    sr=sample_rate,
+                    window_ms=zero_cross_window_ms,
+                ) / sample_rate
+                end_candidate = self._find_nearest_zero_crossing(
+                    y_raw,
+                    end_sample,
+                    sr=sample_rate,
+                    window_ms=zero_cross_window_ms,
+                ) / sample_rate
+                start_candidate = max(left_bound, min(component_start, start_candidate))
+                end_candidate = min(right_release_bound, max(component_end, end_candidate))
+
+            updated = dict(seg)
+            updated["start"] = round(start_candidate, 4)
+            updated["end"] = round(end_candidate, 4)
+            refined_segments.append(
+                self._annotate_refined_segment(
+                    updated,
+                    boundary_source="waveform",
+                    refine_confidence=confidence,
+                    refine_reason=refine_reason,
+                    used_fallback_seed=False,
+                )
+            )
+
+        return refined_segments
+
     def refine_filler_segments_to_waveform(
         self,
         audio_path: str,
@@ -2427,9 +3576,14 @@ class AudioService:
             updated = dict(seg)
             updated["start"] = round(snapped_start, 4)
             updated["end"] = round(snapped_end, 4)
-            updated["duration"] = round(updated["end"] - updated["start"], 4)
-            updated["boundary_source"] = "waveform"
-            refined_segments.append(updated)
+            refined_segments.append(
+                self._annotate_refined_segment(
+                    updated,
+                    boundary_source="waveform",
+                    refine_reason="filler_waveform_component",
+                    used_fallback_seed=False,
+                )
+            )
 
         return refined_segments
 
@@ -2542,11 +3696,17 @@ class AudioService:
             filler_words=filler_words,
             profile=profile,
         )
+        attached_tail_hesitations = self.detect_attached_hesitation_offsets(
+            transcript,
+            filler_words=filler_words,
+            profile=profile,
+        )
         logger.info(
-            "analyze_filler_candidates: transcript_fillers=%d, audio_hesitations=%d, attached_hesitations=%d",
+            "analyze_filler_candidates: transcript_fillers=%d, audio_hesitations=%d, attached_hesitations=%d, attached_tail_hesitations=%d",
             len(transcript_fillers),
             len(audio_hesitations),
             len(attached_hesitations),
+            len(attached_tail_hesitations),
         )
         refined_fillers = self.refine_filler_segments_to_waveform(
             audio_path,
@@ -2558,7 +3718,12 @@ class AudioService:
             audio_hesitations,
             profile=profile,
         )
-        return self.merge_filler_detections([*refined_fillers, *refined_hesitations, *attached_hesitations])
+        return self.merge_filler_detections([
+            *refined_fillers,
+            *refined_hesitations,
+            *attached_hesitations,
+            *attached_tail_hesitations,
+        ])
 
     def refine_silence_segments_to_waveform(
         self,
@@ -2571,6 +3736,7 @@ class AudioService:
         natural_pause_floor_ms: int = 60,
         sample_rate: int = 16000,
         hop_ms: int = 5,
+        require_dialogue_valley: bool = False,
         profile: dict[str, Any] | None = None,
     ) -> list[dict]:
         if not segments:
@@ -2603,9 +3769,14 @@ class AudioService:
             window_end = min(duration, end + search_pad_seconds)
             window_idx = np.where((times >= window_start) & (times <= window_end))[0]
             if window_idx.size == 0:
-                fallback_seg = dict(seg)
-                fallback_seg["boundary_source"] = "fallback"
-                refined_segments.append(fallback_seg)
+                if require_dialogue_valley:
+                    continue
+                refined_segments.append(self._annotate_refined_segment(
+                    seg,
+                    boundary_source="fallback",
+                    refine_reason="silence_window_empty",
+                    used_fallback_seed=True,
+                ))
                 continue
 
             local_speech = speech_score[window_idx]
@@ -2642,18 +3813,41 @@ class AudioService:
                     break
 
             if best_interval is None:
-                fallback_seg = dict(seg)
-                fallback_seg["boundary_source"] = "fallback"
-                refined_segments.append(fallback_seg)
+                if require_dialogue_valley:
+                    continue
+                refined_segments.append(self._annotate_refined_segment(
+                    seg,
+                    boundary_source="fallback",
+                    refine_reason="silence_overlap_missing",
+                    used_fallback_seed=True,
+                ))
                 continue
 
             refined_start = max(window_start, float(best_interval[0]))
             refined_end = min(window_end, float(best_interval[1]))
             if refined_end - refined_start < (min_duration_ms / 1000.0):
-                fallback_seg = dict(seg)
-                fallback_seg["boundary_source"] = "fallback"
-                refined_segments.append(fallback_seg)
+                if require_dialogue_valley:
+                    continue
+                refined_segments.append(self._annotate_refined_segment(
+                    seg,
+                    boundary_source="fallback",
+                    refine_reason="silence_too_short",
+                    used_fallback_seed=True,
+                ))
                 continue
+
+            silence_confidence = None
+            silence_reason = "silence_waveform_valley"
+            if require_dialogue_valley:
+                silence_confidence, silence_reason = self._measure_silence_valley_confidence(
+                    profile,
+                    refined_start,
+                    refined_end,
+                    window_start,
+                    window_end,
+                )
+                if silence_reason == "weak_dialogue_valley":
+                    continue
 
             kind = str(seg.get("kind") or "silence")
             output_start = refined_start
@@ -2672,9 +3866,15 @@ class AudioService:
             updated["kind"] = kind
             updated["start"] = round(output_start, 4)
             updated["end"] = round(output_end, 4)
-            updated["duration"] = round(updated["end"] - updated["start"], 4)
-            updated["boundary_source"] = "waveform"
-            refined_segments.append(updated)
+            refined_segments.append(
+                self._annotate_refined_segment(
+                    updated,
+                    boundary_source="waveform",
+                    refine_confidence=silence_confidence,
+                    refine_reason=silence_reason,
+                    used_fallback_seed=False,
+                )
+            )
 
         return refined_segments
 
@@ -2683,6 +3883,7 @@ class AudioService:
         audio_path: str,
         threshold_db: int = -40,
         min_duration_ms: int = 300,
+        require_dialogue_valley: bool = False,
         profile: dict[str, Any] | None = None,
     ) -> list[dict]:
         profile = profile or self.build_waveform_profile(audio_path)
@@ -2696,6 +3897,7 @@ class AudioService:
             silences,
             preserve_padding_ms=None,
             min_duration_ms=max(20, int(min_duration_ms * 0.25)),
+            require_dialogue_valley=require_dialogue_valley,
             profile=profile,
         )
         quiet_speech = self.detect_low_prominence_speech(
@@ -2711,7 +3913,16 @@ class AudioService:
             min_duration_ms=max(120, int(min_duration_ms * 0.5)),
             profile=profile,
         )
-        quiet_speech = self._segments_with_boundary_source(quiet_speech, "waveform")
+        quiet_speech = [
+            self._annotate_refined_segment(
+                segment,
+                boundary_source=str(segment.get("boundary_source") or "waveform"),
+                refine_confidence=segment.get("refine_confidence"),
+                refine_reason=str(segment.get("refine_reason") or "quiet_speech_low_energy"),
+                used_fallback_seed=bool(segment.get("used_fallback_seed", False)),
+            )
+            for segment in quiet_speech
+        ]
         return [*silences, *quiet_speech]
 
     def refine_segments_to_low_energy(
@@ -2733,7 +3944,15 @@ class AudioService:
 
         profile = profile or self.build_waveform_profile(audio_path, sample_rate=sample_rate, hop_ms=hop_ms)
         if profile is None:
-            return segments
+            return [
+                self._annotate_refined_segment(
+                    segment,
+                    boundary_source="seed",
+                    refine_reason="waveform_profile_unavailable",
+                    used_fallback_seed=True,
+                )
+                for segment in segments
+            ]
 
         speech_energy = profile["speech_energy"]
         times = profile["times"]
@@ -2761,11 +3980,21 @@ class AudioService:
                 start = max(0.0, float(seg["start"]))
                 end = min(duration, float(seg["end"]))
             except Exception:
-                refined.append(seg)
+                refined.append(self._annotate_refined_segment(
+                    seg,
+                    boundary_source="seed",
+                    refine_reason="invalid_seed",
+                    used_fallback_seed=True,
+                ))
                 continue
 
             if end <= start:
-                refined.append(seg)
+                refined.append(self._annotate_refined_segment(
+                    seg,
+                    boundary_source="seed",
+                    refine_reason="empty_seed",
+                    used_fallback_seed=True,
+                ))
                 continue
 
             prev_word_end = None
@@ -2808,14 +4037,25 @@ class AudioService:
                 new_end = min(end, midpoint + half)
 
             if new_end <= new_start:
-                refined.append(seg)
+                refined.append(self._annotate_refined_segment(
+                    seg,
+                    boundary_source="seed",
+                    refine_reason="collapsed_after_refine",
+                    used_fallback_seed=True,
+                ))
                 continue
 
             updated = dict(seg)
             updated["start"] = round(max(start, new_start), 4)
             updated["end"] = round(min(end, new_end), 4)
-            updated["duration"] = round(updated["end"] - updated["start"], 4)
-            refined.append(updated)
+            refined.append(
+                self._annotate_refined_segment(
+                    updated,
+                    boundary_source="waveform",
+                    refine_reason="local_low_energy_trim",
+                    used_fallback_seed=False,
+                )
+            )
 
         return refined
 

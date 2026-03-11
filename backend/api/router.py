@@ -20,6 +20,7 @@ from api.routes import (
     scenes,
     diarization,
     evals,
+    clip_search,
 )
 
 api_router = APIRouter()
@@ -44,3 +45,4 @@ api_router.include_router(export.router, prefix="/export", tags=["export"])
 api_router.include_router(scenes.router, prefix="/scenes", tags=["scenes"])
 api_router.include_router(diarization.router, prefix="/diarization", tags=["diarization"])
 api_router.include_router(evals.router, prefix="/evals", tags=["evals"])
+api_router.include_router(clip_search.router, prefix="/clip-search", tags=["clip-search"])

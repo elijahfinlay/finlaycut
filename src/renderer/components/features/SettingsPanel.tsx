@@ -5,6 +5,8 @@ import { Card } from '../common/Card'
 import { apiFetch } from '../../hooks/useApi'
 import { useSettingsStore } from '../../stores/settingsStore'
 
+const GEMINI_API_KEY_URL = 'https://aistudio.google.com/app/apikey'
+
 export function SettingsPanel() {
   const settings = useSettingsStore()
   const [cacheSize, setCacheSize] = useState<string>('0 MB')
@@ -23,9 +25,15 @@ export function SettingsPanel() {
       // since the server doesn't return them (only has_claude_key: bool).
       settings.updateSettings({
         aiBackend: data.ai_backend,
+        visionProvider: data.vision_provider || 'gemini',
         ollamaModel: data.ollama_model,
         claudeModel: data.claude_model || 'claude-sonnet-4-5-20250514',
         whisperModel: data.whisper_model,
+        visionMaxParallelism: data.vision_max_parallelism || 4,
+        clipSearchStorageDir: data.clip_search_storage_dir || '',
+        clipSearchStorageDefaultDir: data.clip_search_storage_default_dir || '',
+        clipSearchStorageDbPath: data.clip_search_storage_configured_db_path || '',
+        clipSearchStorageEffectiveDbPath: data.clip_search_storage_effective_db_path || data.clip_search_storage_configured_db_path || '',
         silenceThresholdDb: data.silence_threshold_db,
         silenceMinDurationMs: data.silence_min_duration_ms,
         silenceMinDurationFrames: Math.max(14, data.silence_min_duration_frames ?? 14),
@@ -59,6 +67,10 @@ export function SettingsPanel() {
           ai_backend: settings.aiBackend,
           claude_api_key: settings.claudeApiKey,
           claude_model: settings.claudeModel,
+          vision_provider: settings.visionProvider,
+          gemini_api_key: settings.geminiApiKey,
+          vision_max_parallelism: settings.visionMaxParallelism,
+          clip_search_storage_dir: settings.clipSearchStorageDir,
           ollama_model: settings.ollamaModel,
           whisper_model: settings.whisperModel,
           silence_threshold_db: settings.silenceThresholdDb,
@@ -71,11 +83,33 @@ export function SettingsPanel() {
           backup_retention_days: settings.backupRetentionDays,
         })
       })
+      if (typeof (window as any).api?.getBackendUrl === 'function') {
+        await loadSettings()
+      }
       setMessage('Settings saved')
     } catch (err: any) {
       setMessage(`Error: ${err.message}`)
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleChooseClipSearchFolder = async () => {
+    try {
+      const result = await window.api.openFolderDialog()
+      if (!result.canceled && result.filePaths.length > 0) {
+        settings.updateSettings({ clipSearchStorageDir: result.filePaths[0] })
+      }
+    } catch (err: any) {
+      setMessage(`Error: ${err.message || 'Could not open folder picker'}`)
+    }
+  }
+
+  const handleOpenGeminiKeyPage = async () => {
+    try {
+      await window.api.openExternal(GEMINI_API_KEY_URL)
+    } catch (err: any) {
+      setMessage(`Error: ${err.message || 'Could not open Gemini API key page'}`)
     }
   }
 
@@ -159,6 +193,70 @@ export function SettingsPanel() {
         </div>
       </Card>
 
+      {/* Vision */}
+      <Card>
+        <h3 className="text-sm font-semibold text-resolve-text mb-4">Visual Analysis</h3>
+        <div className="space-y-4">
+          <div>
+            <label className="text-sm text-resolve-textDim block mb-1">Vision Provider</label>
+            <select
+              value={settings.visionProvider}
+              onChange={(e) => settings.updateSettings({ visionProvider: e.target.value as 'gemini' })}
+              className="w-full bg-resolve-bg border border-resolve-border rounded-lg px-3 py-2 text-sm text-resolve-text"
+            >
+              <option value="gemini">Gemini 2.5 Flash</option>
+            </select>
+          </div>
+          <Slider
+            label="Parallel Clip Requests"
+            value={settings.visionMaxParallelism}
+            onChange={(value) => settings.updateSettings({ visionMaxParallelism: value })}
+            min={1}
+            max={8}
+            step={1}
+          />
+          <p className="text-xs text-resolve-textMuted">
+            Limits how many clips are analyzed at once during visual search indexing.
+          </p>
+          <div>
+            <label className="text-sm text-resolve-textDim block mb-1">Clip Search Storage Folder</label>
+            <div className="flex flex-col gap-2">
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={settings.clipSearchStorageDir}
+                  onChange={(e) => settings.updateSettings({ clipSearchStorageDir: e.target.value })}
+                  placeholder={settings.clipSearchStorageDefaultDir || 'Default app data folder'}
+                  className="flex-1 bg-resolve-bg border border-resolve-border rounded-lg px-3 py-2 text-sm text-resolve-text placeholder:text-resolve-textMuted"
+                />
+                <Button variant="ghost" onClick={handleChooseClipSearchFolder}>
+                  Browse
+                </Button>
+                <Button
+                  variant="ghost"
+                  onClick={() => settings.updateSettings({ clipSearchStorageDir: '' })}
+                  disabled={!settings.clipSearchStorageDir}
+                >
+                  Default
+                </Button>
+              </div>
+              <p className="text-xs text-resolve-textMuted">
+                Visual labels and search index are stored in `clip_search.sqlite3` inside this folder.
+              </p>
+              <p className="text-xs text-resolve-textMuted">
+                Current database path: {settings.clipSearchStorageDbPath || `${settings.clipSearchStorageDefaultDir}/clip_search.sqlite3`}
+              </p>
+              {settings.clipSearchStorageEffectiveDbPath &&
+                settings.clipSearchStorageEffectiveDbPath !== settings.clipSearchStorageDbPath && (
+                  <p className="text-xs text-resolve-warning">
+                    Active fallback path: {settings.clipSearchStorageEffectiveDbPath}
+                  </p>
+                )}
+            </div>
+          </div>
+        </div>
+      </Card>
+
       {/* Whisper */}
       <Card>
         <h3 className="text-sm font-semibold text-resolve-text mb-4">Whisper Model</h3>
@@ -230,6 +328,24 @@ export function SettingsPanel() {
           />
           <p className="text-xs text-resolve-textMuted mt-1">
             Free at pexels.com/api. 200 requests/hour.
+          </p>
+        </div>
+        <div className="mt-4">
+          <div className="mb-1 flex items-center justify-between gap-3">
+            <label className="text-sm text-resolve-textDim">Gemini API Key (for Clip Search)</label>
+            <Button variant="ghost" size="sm" onClick={handleOpenGeminiKeyPage}>
+              Get Gemini API Key
+            </Button>
+          </div>
+          <input
+            type="text"
+            value={settings.geminiApiKey}
+            onChange={(e) => settings.updateSettings({ geminiApiKey: e.target.value })}
+            placeholder="AIza..."
+            className="w-full bg-resolve-bg border border-resolve-border rounded-lg px-3 py-2 text-sm text-resolve-text placeholder:text-resolve-textMuted font-mono"
+          />
+          <p className="text-xs text-resolve-textMuted mt-1">
+            Used for visual clip labeling and search indexing.
           </p>
         </div>
       </Card>

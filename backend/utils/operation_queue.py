@@ -17,14 +17,16 @@ _current_operation: str | None = None
 _operation_started_at: float | None = None
 
 # Auto-release stuck operations after this many seconds
-_OPERATION_TIMEOUT_SECONDS = 600  # 10 minutes
+_DEFAULT_OPERATION_TIMEOUT_SECONDS = 600  # 10 minutes
+_operation_timeout_seconds: float | None = None
 
 
 def _is_operation_stale() -> bool:
     """Check if the current operation has exceeded the timeout."""
     if _operation_started_at is None:
         return False
-    return (time.time() - _operation_started_at) > _OPERATION_TIMEOUT_SECONDS
+    timeout = _operation_timeout_seconds or _DEFAULT_OPERATION_TIMEOUT_SECONDS
+    return (time.time() - _operation_started_at) > timeout
 
 
 def force_reset_operation() -> dict:
@@ -47,7 +49,7 @@ def force_reset_operation() -> dict:
     return {"reset": False, "message": "No operation was running"}
 
 
-def heavy_operation(operation_name: str):
+def heavy_operation(operation_name: str, timeout_seconds: float | None = None):
     """Decorator for route handlers that perform heavy operations.
     Returns HTTP 409 if another heavy operation is already running.
     Auto-resets if the current operation has exceeded the timeout."""
@@ -55,17 +57,20 @@ def heavy_operation(operation_name: str):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             global _current_operation, _operation_started_at, _heavy_op_semaphore
+            global _operation_timeout_seconds
 
             # Auto-reset stale operations
             if _heavy_op_semaphore.locked() and _is_operation_stale():
                 stale_op = _current_operation
+                timeout = _operation_timeout_seconds or _DEFAULT_OPERATION_TIMEOUT_SECONDS
                 logger.warning(
-                    "Auto-resetting stale operation '%s' (started %.0fs ago)",
-                    stale_op, time.time() - (_operation_started_at or 0),
+                    "Auto-resetting stale operation '%s' (started %.0fs ago, timeout %.0fs)",
+                    stale_op, time.time() - (_operation_started_at or 0), timeout,
                 )
                 _heavy_op_semaphore = asyncio.Semaphore(1)
                 _current_operation = None
                 _operation_started_at = None
+                _operation_timeout_seconds = None
 
             if _heavy_op_semaphore.locked():
                 raise HTTPException(
@@ -75,11 +80,13 @@ def heavy_operation(operation_name: str):
             async with _heavy_op_semaphore:
                 _current_operation = operation_name
                 _operation_started_at = time.time()
+                _operation_timeout_seconds = timeout_seconds
                 try:
                     return await func(*args, **kwargs)
                 finally:
                     _current_operation = None
                     _operation_started_at = None
+                    _operation_timeout_seconds = None
         return wrapper
     return decorator
 
@@ -93,4 +100,5 @@ def get_current_operation() -> dict | None:
         "name": _current_operation,
         "elapsed_seconds": round(elapsed, 1),
         "stale": _is_operation_stale(),
+        "timeout_seconds": round(float(_operation_timeout_seconds or _DEFAULT_OPERATION_TIMEOUT_SECONDS), 1),
     }

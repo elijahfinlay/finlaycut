@@ -2,7 +2,7 @@ import { ChildProcess, spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { existsSync, readdirSync } from 'fs'
 import { cp, mkdir, readFile, writeFile } from 'fs/promises'
-import { join, basename } from 'path'
+import { join, basename, dirname } from 'path'
 import { app } from 'electron'
 import { is } from '@electron-toolkit/utils'
 
@@ -27,7 +27,7 @@ interface PythonCommand {
 }
 
 interface RuntimeMetadata {
-  appVersion: string
+  appVersion?: string
   requirementsHash: string
 }
 
@@ -188,6 +188,10 @@ export class PythonManager {
     return join(this.getRuntimeRootPath(), 'runtime.json')
   }
 
+  private getDevRuntimeMetadataPath(backendPath: string): string {
+    return join(backendPath, '.venv', '.finlaycut-runtime.json')
+  }
+
   private appendLog(message: string): void {
     const line = `[${new Date().toISOString()}] ${message}`
     this._logs = [...this._logs.slice(-(MAX_LOG_LINES - 1)), line]
@@ -305,11 +309,11 @@ export class PythonManager {
       .digest('hex')
   }
 
-  private async readRuntimeMetadata(): Promise<RuntimeMetadata | null> {
+  private async readRuntimeMetadataAt(metadataPath: string): Promise<RuntimeMetadata | null> {
     try {
-      const raw = await readFile(this.getRuntimeMetadataPath(), 'utf8')
+      const raw = await readFile(metadataPath, 'utf8')
       const parsed = JSON.parse(raw) as RuntimeMetadata
-      if (!parsed.appVersion || !parsed.requirementsHash) {
+      if (!parsed.requirementsHash) {
         return null
       }
       return parsed
@@ -318,9 +322,17 @@ export class PythonManager {
     }
   }
 
+  private async readRuntimeMetadata(): Promise<RuntimeMetadata | null> {
+    return this.readRuntimeMetadataAt(this.getRuntimeMetadataPath())
+  }
+
+  private async writeRuntimeMetadataAt(metadataPath: string, metadata: RuntimeMetadata): Promise<void> {
+    await mkdir(dirname(metadataPath), { recursive: true })
+    await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf8')
+  }
+
   private async writeRuntimeMetadata(metadata: RuntimeMetadata): Promise<void> {
-    await mkdir(this.getRuntimeRootPath(), { recursive: true })
-    await writeFile(this.getRuntimeMetadataPath(), `${JSON.stringify(metadata, null, 2)}\n`, 'utf8')
+    await this.writeRuntimeMetadataAt(this.getRuntimeMetadataPath(), metadata)
   }
 
   private async syncPackagedBackend(): Promise<string> {
@@ -486,7 +498,38 @@ export class PythonManager {
   private async prepareRuntime(): Promise<PreparedRuntime> {
     if (is.dev) {
       const backendPath = this.getWorkingBackendPath()
-      const pythonPath = this.findExistingVenvPython(backendPath) ?? 'python3'
+      const pythonPath = this.findExistingVenvPython(backendPath)
+      if (!pythonPath) {
+        return { backendPath, pythonPath: 'python3' }
+      }
+
+      const requirementsPath = join(backendPath, 'requirements.txt')
+      const requirementsHash = await this.computeRequirementsHash(requirementsPath)
+      const metadataPath = this.getDevRuntimeMetadataPath(backendPath)
+      const runtimeMetadata = await this.readRuntimeMetadataAt(metadataPath)
+      const needsInstall = runtimeMetadata?.requirementsHash !== requirementsHash
+
+      if (needsInstall) {
+        this.setPhase('installing-dependencies', 'Syncing backend dependencies for development…')
+        await this.runCommand(
+          'Upgrade pip',
+          pythonPath,
+          ['-m', 'pip', 'install', '--upgrade', 'pip'],
+          backendPath,
+          process.env,
+        )
+        await this.runCommand(
+          'Install backend dependencies',
+          pythonPath,
+          ['-m', 'pip', 'install', '-r', 'requirements.txt'],
+          backendPath,
+          process.env,
+        )
+        await this.writeRuntimeMetadataAt(metadataPath, {
+          requirementsHash,
+        })
+      }
+
       return { backendPath, pythonPath }
     }
 

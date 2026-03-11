@@ -31,6 +31,7 @@ process.stderr?.on('error', (err) => {
 let mainWindow: BrowserWindow | null = null
 let pythonManager: PythonManager | null = null
 let appQuitting = false
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
 
 function blockReloadShortcuts(window: BrowserWindow): void {
   window.webContents.on('before-input-event', (event, input) => {
@@ -107,49 +108,70 @@ function createWindow(): void {
   }
 }
 
-app.whenReady().then(async () => {
-  electronApp.setAppUserModelId('com.finlaycut.app')
+if (!hasSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) {
+        mainWindow.restore()
+      }
+      if (!mainWindow.isVisible()) {
+        mainWindow.show()
+      }
+      mainWindow.focus()
+      return
+    }
 
-  // FIX BUG #1: Register app menu so Cmd+C/V/X/Z/A work (paste was broken without this)
-  Menu.setApplicationMenu(
-    Menu.buildFromTemplate([
-      { role: 'appMenu' },
-      { role: 'editMenu' },
-      {
-        label: 'View',
-        submenu: [
-          { role: 'resetZoom' },
-          { role: 'zoomIn' },
-          { role: 'zoomOut' },
-          ...(is.dev ? [{ type: 'separator' as const }, { role: 'toggleDevTools' as const }] : []),
-          { type: 'separator' },
-          { role: 'togglefullscreen' },
-        ],
-      },
-      { role: 'windowMenu' },
-    ])
-  )
-
-  app.on('browser-window-created', (_, window) => {
-    optimizer.watchWindowShortcuts(window)
-  })
-
-  pythonManager = new PythonManager()
-  registerIpcHandlers(pythonManager)
-  createWindow()
-
-  void pythonManager.start().catch((error) => {
-    try {
-      console.error('[FinlayCut] Backend startup failed:', error)
-    } catch {
-      // Ignore logging failures.
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow()
     }
   })
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  app.whenReady().then(async () => {
+    electronApp.setAppUserModelId('com.finlaycut.app')
+
+    // FIX BUG #1: Register app menu so Cmd+C/V/X/Z/A work (paste was broken without this)
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate([
+        { role: 'appMenu' },
+        { role: 'editMenu' },
+        {
+          label: 'View',
+          submenu: [
+            { role: 'resetZoom' },
+            { role: 'zoomIn' },
+            { role: 'zoomOut' },
+            ...(is.dev ? [{ type: 'separator' as const }, { role: 'toggleDevTools' as const }] : []),
+            { type: 'separator' },
+            { role: 'togglefullscreen' },
+          ],
+        },
+        { role: 'windowMenu' },
+      ])
+    )
+
+    app.on('browser-window-created', (_, window) => {
+      optimizer.watchWindowShortcuts(window)
+    })
+
+    pythonManager = new PythonManager()
+    registerIpcHandlers(pythonManager)
+    createWindow()
+
+    void pythonManager.start().catch((error) => {
+      try {
+        console.error('[FinlayCut] Backend startup failed:', error)
+      } catch {
+        // Ignore logging failures.
+      }
+    })
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    })
   })
-})
+}
 
 // FIX BUG #11: Only stop Python once
 let pythonStopped = false

@@ -20,6 +20,9 @@ export interface TranscriptToolbarProps {
   hasDetectedFillers: boolean
   onMarkRepetitions: () => void
   findingRepetitions: boolean
+  onQuickAnalyze: () => void
+  quickAnalyzeRunning: boolean
+  quickAnalyzeLabel: string
   autoDetectFillers: boolean
   onToggleAutoDetect: () => void
   fillerCount: number
@@ -129,6 +132,19 @@ export function TranscriptToolbar(props: TranscriptToolbarProps) {
 
       {/* Row 2: Analysis tools + Export */}
       <div className="flex flex-wrap items-center gap-2">
+        <ButtonGroup>
+          <Button
+            size="sm"
+            onClick={props.onQuickAnalyze}
+            loading={props.quickAnalyzeRunning}
+            disabled={props.transcriptMutationBlocked}
+            className="bg-resolve-accent hover:bg-resolve-accentHover text-white"
+            title="Run the core cleanup pass: silences, filler words, retakes, and speakers"
+          >
+            {props.quickAnalyzeRunning ? props.quickAnalyzeLabel : 'Quick Analyze'}
+          </Button>
+        </ButtonGroup>
+
         <ButtonGroup>
           <Button
             variant="ghost"

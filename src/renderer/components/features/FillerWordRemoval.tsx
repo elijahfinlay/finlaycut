@@ -9,6 +9,7 @@ import { apiFetch } from '../../hooks/useApi'
 import { useProgress } from '../../hooks/useWebSocket'
 import { useFeatureDataStore } from '../../stores/featureDataStore'
 import { useOperationStore } from '../../stores/operationStore'
+import { useProjectStore } from '../../stores/projectStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 
 interface FillerDetection {
@@ -41,17 +42,29 @@ export function FillerWordRemoval() {
   const op = useOperationStore((s) => s.operations[OP_NAME])
   const isRunning = op?.status === 'running'
   const fillerWords = useSettingsStore((s) => s.fillerWords)
+  const connected = useProjectStore((s) => s.connected)
+  const timelineName = useProjectStore((s) => s.timelineName)
+  const hasPendingResolveChange = useProjectStore((s) => s.hasPendingResolveChange)
+  const pendingProjectName = useProjectStore((s) => s.pendingProjectName)
+  const pendingTimelineName = useProjectStore((s) => s.pendingTimelineName)
 
   const [detections, setDetections] = useState<FillerDetection[]>(storedDetections)
   const [applying, setApplying] = useState(false)
+  const [previewing, setPreviewing] = useState(false)
+  const [hasMarkerPreview, setHasMarkerPreview] = useState(false)
   const [result, setResult] = useState<any>(null)
   const [undoEntryId, setUndoEntryId] = useState<string | null>(null)
   const [showUndoConfirm, setShowUndoConfirm] = useState(false)
   const [undoing, setUndoing] = useState(false)
   const { progress, message, elapsed, eta } = useProgress(OP_NAME)
   const abortRef = useRef<AbortController | null>(null)
+  const hasMarkerPreviewRef = useRef(hasMarkerPreview)
 
   const hasTranscript = transcriptWords.length > 0
+
+  useEffect(() => {
+    hasMarkerPreviewRef.current = hasMarkerPreview
+  }, [hasMarkerPreview])
 
   // Persist detections across tab switches
   useEffect(() => {
@@ -108,10 +121,18 @@ export function FillerWordRemoval() {
         setResult({ error: data.error })
         toast.error(data.error)
       } else {
+        const nextDetections = data.detections || []
         useFeatureDataStore.getState().setFillerDetections(data.detections || [])
         useOperationStore.getState().completeOperation(OP_NAME, data)
-        setDetections(data.detections || [])
-        if (data.detections?.length === 0) {
+        setDetections(nextDetections)
+        if (hasMarkerPreviewRef.current) {
+          try {
+            await refreshMarkerPreview(nextDetections, { announce: nextDetections.length > 0 })
+          } catch (previewErr: any) {
+            toast.error(previewErr.message || 'Failed to refresh filler review markers')
+          }
+        }
+        if (nextDetections.length === 0) {
           toast.info('No filler words detected')
         }
       }
@@ -138,6 +159,67 @@ export function FillerWordRemoval() {
 
   const prevDetectionsRef = useRef<FillerDetection[]>([])
 
+  const ensureResolvePreviewTarget = () => {
+    if (hasPendingResolveChange) {
+      const pendingTarget = pendingTimelineName
+        ? `${pendingProjectName ? `${pendingProjectName} / ` : ''}${pendingTimelineName}`
+        : 'the current Resolve timeline'
+      toast.info(`Resolve is on ${pendingTarget}. Click Reconnect in the header before previewing filler markers.`)
+      return false
+    }
+    if (!connected || !timelineName) {
+      toast.error('Open a Resolve timeline before previewing filler markers.')
+      return false
+    }
+    return true
+  }
+
+  const refreshMarkerPreview = async (
+    previewDetections: FillerDetection[],
+    options: { announce?: boolean } = {}
+  ) => {
+    const announce = options.announce ?? true
+    setPreviewing(true)
+    try {
+      const data = await apiFetch('/api/filler-words/preview-markers', {
+        method: 'POST',
+        body: JSON.stringify(previewDetections),
+      })
+      if (data.success) {
+        const nextPreviewState = previewDetections.some((d) => d.selected)
+        setHasMarkerPreview(nextPreviewState)
+        if (announce) {
+          if (data.count > 0) {
+            toast.success(data.message || 'Filler review markers updated')
+          } else {
+            toast.info(data.message || 'Filler review markers cleared')
+          }
+        }
+        return data
+      }
+      if (data.error) {
+        throw new Error(data.error)
+      }
+      return data
+    } finally {
+      setPreviewing(false)
+    }
+  }
+
+  const handlePreviewMarkers = async () => {
+    if (!ensureResolvePreviewTarget()) return
+    if (selectedCount === 0) {
+      toast.info('Select at least one filler word to preview.')
+      return
+    }
+
+    try {
+      await refreshMarkerPreview(detections.filter((d) => d.selected))
+    } catch (err: any) {
+      toast.error(err.message)
+    }
+  }
+
   const handleApply = async () => {
     setApplying(true)
     prevDetectionsRef.current = detections
@@ -151,6 +233,7 @@ export function FillerWordRemoval() {
         toast.success(data.message || 'Filler words removed successfully')
         setUndoEntryId(data.undo_entry_id || null)
         setDetections([])
+        setHasMarkerPreview(false)
       } else if (data.error) {
         toast.error(data.error)
       }
@@ -294,9 +377,22 @@ export function FillerWordRemoval() {
               ))}
             </div>
 
-            <ConfirmApply onConfirm={handleApply} loading={applying} size="lg">
-              Remove Selected ({selectedCount})
-            </ConfirmApply>
+            <div className="space-y-2">
+              <Button
+                onClick={handlePreviewMarkers}
+                size="lg"
+                loading={previewing}
+                disabled={selectedCount === 0}
+              >
+                {hasMarkerPreview ? 'Refresh Filler Preview' : 'Preview Filler Markers'}
+              </Button>
+              <p className="text-xs text-resolve-textMuted">
+                Review detected filler spans on the Resolve timeline before applying cuts. Manual markers stay untouched.
+              </p>
+              <ConfirmApply onConfirm={handleApply} loading={applying} disabled={selectedCount === 0} size="lg">
+                Remove Selected ({selectedCount})
+              </ConfirmApply>
+            </div>
           </div>
         </Card>
       )}

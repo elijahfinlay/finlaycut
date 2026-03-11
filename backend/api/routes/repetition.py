@@ -1,12 +1,15 @@
 """Repetition/take detection and removal endpoints."""
 
+import json
 import logging
+from pathlib import Path
 from typing import Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
 from services.resolve_service import resolve_service
 from services.audio_service import audio_service
 from services.ai_service import ai_service
+from services.cut_refiner_service import cut_refiner_service
 from utils.audio_utils import extract_audio, extract_audio_segment
 from utils.operation_queue import heavy_operation
 from api.websocket import manager
@@ -14,6 +17,9 @@ from api.websocket import manager
 logger = logging.getLogger("finlaycut.repetition")
 
 router = APIRouter()
+
+DUPLICATE_CLIP_MARKER_NAMESPACE = "finlaycut:duplicate-clip-review"
+DUPLICATE_CLIP_MARKER_COLOR = "Rose"
 
 
 class RepetitionDetectRequest(BaseModel):
@@ -86,6 +92,197 @@ def _frame_range_to_segment(start_frame: int, end_frame: int, timeline_start_fra
         "start": (int(start_frame) - int(timeline_start_frame)) / float(fps),
         "end": (int(end_frame) - int(timeline_start_frame)) / float(fps),
     }
+
+
+def _coerce_int(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _build_duplicate_clip_groups(
+    records: list[dict],
+    timeline_start_frame: int,
+    fps: float,
+) -> tuple[list[dict], int]:
+    grouped: dict[tuple[str, int, int], dict] = {}
+    skipped_untrackable = 0
+
+    for record in records:
+        clip_start_frame = _coerce_int(record.get("clip_start_frame"))
+        clip_end_frame = _coerce_int(record.get("clip_end_frame"))
+        source_start_frame = _coerce_int(record.get("source_start_frame"))
+        source_end_frame = _coerce_int(record.get("source_end_frame"))
+
+        if (
+            clip_start_frame is None
+            or clip_end_frame is None
+            or clip_end_frame <= clip_start_frame
+            or source_start_frame is None
+            or source_end_frame is None
+            or source_end_frame <= source_start_frame
+        ):
+            skipped_untrackable += 1
+            continue
+
+        media_pool_item_unique_id = str(record.get("media_pool_item_unique_id") or "").strip()
+        file_path = str(record.get("file_path") or "").strip()
+        source_key = media_pool_item_unique_id or file_path
+        if not source_key:
+            skipped_untrackable += 1
+            continue
+
+        clip_name = str(record.get("clip_name") or "").strip() or "Clip"
+        source_label = Path(file_path).name if file_path else f"Media {source_key[:8]}"
+        group_key = (source_key, source_start_frame, source_end_frame)
+        group = grouped.setdefault(
+            group_key,
+            {
+                "source_key": source_key,
+                "source_label": source_label,
+                "source_start_frame": source_start_frame,
+                "source_end_frame": source_end_frame,
+                "instances": [],
+            },
+        )
+
+        group["instances"].append(
+            {
+                "item": record.get("item"),
+                "clip_name": clip_name,
+                "track_index": int(record.get("track_index") or 1),
+                "timeline_item_unique_id": record.get("timeline_item_unique_id"),
+                "timeline_start_frame": clip_start_frame,
+                "timeline_end_frame": clip_end_frame,
+                "timeline_start_seconds": (clip_start_frame - int(timeline_start_frame)) / float(fps),
+                "timeline_end_seconds": (clip_end_frame - int(timeline_start_frame)) / float(fps),
+                "source_start_frame": source_start_frame,
+                "source_end_frame": source_end_frame,
+            }
+        )
+
+    groups = [group for group in grouped.values() if len(group["instances"]) > 1]
+    for group in groups:
+        group["instances"].sort(
+            key=lambda instance: (
+                int(instance["timeline_start_frame"]),
+                int(instance["track_index"]),
+                str(instance.get("timeline_item_unique_id") or ""),
+            )
+        )
+        group["instance_count"] = len(group["instances"])
+
+    groups.sort(
+        key=lambda group: (
+            int(group["instances"][0]["timeline_start_frame"]),
+            int(group["instances"][0]["track_index"]),
+            str(group["source_label"]),
+        )
+    )
+    return groups, skipped_untrackable
+
+
+def _serialize_duplicate_clip_groups(groups: list[dict]) -> list[dict]:
+    serialized_groups: list[dict] = []
+    for group in groups:
+        serialized_groups.append(
+            {
+                "source_key": group["source_key"],
+                "source_label": group["source_label"],
+                "source_start_frame": int(group["source_start_frame"]),
+                "source_end_frame": int(group["source_end_frame"]),
+                "instance_count": int(group.get("instance_count") or len(group.get("instances") or [])),
+                "instances": [
+                    {
+                        "clip_name": str(instance.get("clip_name") or "Clip"),
+                        "track_index": int(instance.get("track_index") or 1),
+                        "timeline_item_unique_id": instance.get("timeline_item_unique_id"),
+                        "timeline_start_frame": int(instance["timeline_start_frame"]),
+                        "timeline_end_frame": int(instance["timeline_end_frame"]),
+                        "timeline_start_seconds": float(instance["timeline_start_seconds"]),
+                        "timeline_end_seconds": float(instance["timeline_end_seconds"]),
+                        "source_start_frame": int(instance["source_start_frame"]),
+                        "source_end_frame": int(instance["source_end_frame"]),
+                    }
+                    for instance in group.get("instances", [])
+                ],
+            }
+        )
+    return serialized_groups
+
+
+def _build_duplicate_clip_markers(groups: list[dict]) -> tuple[list[dict], list[dict]]:
+    timeline_markers: list[dict] = []
+    timeline_item_markers: list[dict] = []
+
+    for group_index, group in enumerate(groups):
+        for instance_index, instance in enumerate(group.get("instances", [])):
+            clip_start_frame = int(instance["timeline_start_frame"])
+            clip_end_frame = int(instance["timeline_end_frame"])
+            source_start_frame = int(instance["source_start_frame"])
+            source_end_frame = int(instance["source_end_frame"])
+            timeline_duration = max(1, clip_end_frame - clip_start_frame)
+            source_duration = max(1, source_end_frame - source_start_frame)
+            clip_name = str(instance.get("clip_name") or "Clip")
+            track_index = int(instance.get("track_index") or 1)
+
+            shared_note = (
+                f'Duplicate clip detected: "{clip_name}" on V{track_index}.\n'
+                f"Source: {group['source_label']} [{source_start_frame}-{source_end_frame}]\n"
+                f"Timeline: {float(instance['timeline_start_seconds']):.2f}s-{float(instance['timeline_end_seconds']):.2f}s"
+            )
+            marker_payload = {
+                "version": 1,
+                "feature": "duplicate_clip_review",
+                "kind": "duplicate_clip",
+                "group_index": int(group_index),
+                "instance_index": int(instance_index),
+                "source_key": group["source_key"],
+                "source_start_frame": source_start_frame,
+                "source_end_frame": source_end_frame,
+                "track_index": track_index,
+                "timeline_item_unique_id": instance.get("timeline_item_unique_id"),
+                "clip_name": clip_name,
+            }
+
+            timeline_markers.append(
+                {
+                    "frame_id": clip_start_frame,
+                    "duration": timeline_duration,
+                    "color": DUPLICATE_CLIP_MARKER_COLOR,
+                    "name": f"Duplicate Clip - {clip_name}",
+                    "note": shared_note,
+                    "custom_data": json.dumps(
+                        {**marker_payload, "marker_target": "timeline"},
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                }
+            )
+
+            item = instance.get("item")
+            if item is None:
+                continue
+            timeline_item_markers.append(
+                {
+                    "item": item,
+                    "frame_id": source_start_frame,
+                    "duration": source_duration,
+                    "color": DUPLICATE_CLIP_MARKER_COLOR,
+                    "name": f"Duplicate Clip - {clip_name}",
+                    "note": f"{shared_note}\nReview this duplicate source span on the timeline.",
+                    "custom_data": json.dumps(
+                        {**marker_payload, "marker_target": "timeline_item"},
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                }
+            )
+
+    return timeline_markers, timeline_item_markers
 
 
 @router.post("/detect")
@@ -168,6 +365,120 @@ async def detect_repetitions(request: RepetitionDetectRequest = RepetitionDetect
         return {"error": str(e)}
 
 
+@router.post("/duplicate-clips/scan")
+async def scan_duplicate_clips():
+    """Detect duplicate clips on the current timeline and refresh review markers."""
+    if not resolve_service.connected:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    timeline = resolve_service.get_current_timeline()
+    if timeline is None:
+        return {"error": "No active timeline"}
+
+    fps_str = timeline.GetSetting("timelineFrameRate")
+    fps = float(fps_str) if fps_str else 24.0
+    timeline_start_frame = int(timeline.GetStartFrame())
+    timeline_name = timeline.GetName() if hasattr(timeline, "GetName") else None
+
+    raw_records = resolve_service._get_timeline_item_records(media_types=("video",))
+    duplicate_candidate_records: list[dict] = []
+    for record in raw_records:
+        item = record.get("item")
+        duplicate_candidate_records.append(
+            {
+                **record,
+                "media_pool_item_unique_id": (
+                    str(record.get("media_pool_item_unique_id") or "").strip()
+                    or resolve_service.get_media_pool_item_unique_id(item)
+                ),
+                "clip_name": (
+                    str(record.get("clip_name") or "").strip()
+                    or resolve_service.get_timeline_item_name(item)
+                ),
+            }
+        )
+
+    groups, skipped_untrackable_count = _build_duplicate_clip_groups(
+        duplicate_candidate_records,
+        timeline_start_frame=timeline_start_frame,
+        fps=fps,
+    )
+    serialized_groups = _serialize_duplicate_clip_groups(groups)
+
+    if not groups:
+        clear_result = resolve_service.refresh_managed_markers(
+            DUPLICATE_CLIP_MARKER_NAMESPACE,
+            clear_item_media_types=("video",),
+        )
+        if clear_result.get("error"):
+            return {"error": clear_result["error"]}
+
+        cleared_count = int(clear_result.get("deleted_count") or 0)
+        message = "No duplicate clips detected"
+        if timeline_name:
+            message = f"{message} on {timeline_name}"
+        if cleared_count:
+            message = f"{message}. Cleared {cleared_count} duplicate review markers"
+        if skipped_untrackable_count:
+            message = f"{message} ({skipped_untrackable_count} skipped)"
+
+        return {
+            "success": True,
+            "groups": [],
+            "duplicate_group_count": 0,
+            "duplicate_instance_count": 0,
+            "timeline_marker_count": 0,
+            "clip_marker_count": 0,
+            "cleared_count": cleared_count,
+            "skipped_untrackable_count": skipped_untrackable_count,
+            "message": message,
+        }
+
+    timeline_markers, timeline_item_markers = _build_duplicate_clip_markers(groups)
+    result = resolve_service.refresh_managed_markers(
+        DUPLICATE_CLIP_MARKER_NAMESPACE,
+        timeline_markers=timeline_markers,
+        timeline_item_markers=timeline_item_markers,
+        clear_item_media_types=("video",),
+    )
+    if result.get("error"):
+        return {"error": result["error"]}
+
+    duplicate_instance_count = sum(int(group.get("instance_count") or 0) for group in groups)
+    timeline_marker_count = int(result.get("timeline_applied_count") or 0)
+    clip_marker_count = int(result.get("timeline_item_applied_count") or 0)
+    failed_count = len(result.get("failed_frames") or []) + len(result.get("timeline_item_failed_frames") or [])
+
+    message = (
+        f"Flagged {duplicate_instance_count} duplicate clip instance"
+        f"{'' if duplicate_instance_count == 1 else 's'} across {len(groups)} duplicate source span"
+        f"{'' if len(groups) == 1 else 's'}"
+    )
+    if timeline_name:
+        message = f"{message} on {timeline_name}"
+    if skipped_untrackable_count:
+        message = f"{message} ({skipped_untrackable_count} skipped)"
+
+    response = {
+        "success": True,
+        "groups": serialized_groups,
+        "duplicate_group_count": len(groups),
+        "duplicate_instance_count": duplicate_instance_count,
+        "timeline_marker_count": timeline_marker_count,
+        "clip_marker_count": clip_marker_count,
+        "cleared_count": int(result.get("deleted_count") or 0),
+        "skipped_untrackable_count": skipped_untrackable_count,
+        "message": message,
+    }
+    if failed_count:
+        response["warning"] = (
+            f"Placed {timeline_marker_count + clip_marker_count} of "
+            f"{len(timeline_markers) + len(timeline_item_markers)} duplicate review markers. "
+            "Some markers could not be added, likely because another marker already occupies that frame."
+        )
+    return response
+
+
 @router.post("/apply")
 async def apply_repetition_removal(groups: list[dict]):
     """Remove unwanted takes, keeping the best one from each group."""
@@ -213,15 +524,34 @@ async def apply_repetition_removal(groups: list[dict]):
     if not segments_to_remove:
         return {"success": True, "message": "Nothing to remove"}
 
-    cut_frame_ranges = _merge_frame_ranges([
-        _take_to_frame_range(rem, tl_start, fps)
-        for rem in segments_to_remove
-    ])
-    kept_frame_ranges = _subtract_frame_ranges(tl_start, tl_end, cut_frame_ranges)
-    kept_segments = [
-        _frame_range_to_segment(start_frame, end_frame, tl_start, fps)
-        for start_frame, end_frame in kept_frame_ranges
-    ]
+    repetition_candidates = []
+    for rem in segments_to_remove:
+        start_frame, end_frame = _take_to_frame_range(rem, tl_start, fps)
+        repetition_candidates.append({
+            **rem,
+            "kind": "retake",
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "prev_word_end": rem.get("prev_word_end"),
+            "prev_word_end_frame": rem.get("prev_word_end_frame"),
+            "next_word_start": rem.get("next_word_start"),
+            "next_word_start_frame": rem.get("next_word_start_frame"),
+        })
+
+    refinement = cut_refiner_service.refine_cut_candidates(
+        repetition_candidates,
+        name_prefix="finlaycut_repetition_apply",
+    )
+    if refinement.get("error"):
+        return {"error": refinement["error"]}
+
+    cut_frame_ranges = list(refinement["cut_frame_ranges"])
+    kept_segments = list(refinement["kept_segments"])
+    applied_cut_segments = list(refinement["applied_cut_segments"])
+    if not cut_frame_ranges:
+        return {"error": "No duplicate take sections remained removable after waveform refinement"}
+    if not kept_segments:
+        return {"error": "Nothing would remain after removing the selected takes"}
 
     result = resolve_service.rebuild_timeline_keeping(kept_segments, in_place=True)
     if not result["success"]:
@@ -242,6 +572,7 @@ async def apply_repetition_removal(groups: list[dict]):
         "total_removed_seconds": round(total_removed, 1),
         "backup_timeline": backup_name,
         "timeline_name": result.get("timeline_name"),
+        "applied_cut_segments": applied_cut_segments,
         "undo_entry_id": undo_entry["id"],
         "message": f"Removed {len(cut_frame_ranges)} duplicate take sections ({total_removed:.1f}s) on the current timeline. Backup: {backup_name}"
     }
